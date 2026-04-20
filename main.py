@@ -330,6 +330,13 @@ app.include_router(public_router, prefix="/api/public", tags=["Public"])
 # Include Me (Self) API
 app.include_router(me_router, prefix="/api")
 
+# Ensure uploads directory exists
+import os
+upload_dirs = ["uploads", "uploads/campaign_data", "uploads/trigger_media"]
+for d in upload_dirs:
+    if not os.path.exists(d):
+        os.makedirs(d, exist_ok=True)
+
 # Mount static files
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
