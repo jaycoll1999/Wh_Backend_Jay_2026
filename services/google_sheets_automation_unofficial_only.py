@@ -22,8 +22,10 @@ import asyncio
 import logging
 import uuid
 import re
+import os
+import pandas as pd
 from datetime import datetime, timedelta, timezone, time, date
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, text
 
@@ -61,6 +63,84 @@ class GoogleSheetsAutomationServiceUnofficial:
         self.sheets_service = GoogleSheetsService()
         self.unified_service = UnifiedWhatsAppService(db)
 
+    def _load_local_file_data(self, file_path: str) -> Tuple[List[Dict[str, Any]], List[str]]:
+        """
+        🚀 Load data from a local CSV or Excel file.
+        Returns (rows_data, headers_data) in the same format as GoogleSheetsService.
+        """
+        logger.info(f"📁 Loading local file data: {file_path}")
+        
+        # Normalize path separators
+        file_path = file_path.replace("\\", "/")
+        
+        # Check if already absolute and exists
+        if os.path.isabs(file_path) and os.path.exists(file_path):
+            pass
+        elif not os.path.exists(file_path):
+            # Try prepending current directory or common upload paths
+            base_dir = os.getcwd()
+            base_paths = [
+                base_dir,
+                os.path.join(base_dir, "uploads"),
+                os.path.join(base_dir, "uploads/campaign_data"),
+                os.path.join(base_dir, "uploads/trigger_media")
+            ]
+            found = False
+            
+            # Extract basename if it's a messed up path
+            basename = os.path.basename(file_path)
+            
+            for bp in base_paths:
+                # Try with full path first
+                test_path = os.path.join(bp, file_path) if not file_path.startswith("/") else file_path
+                if os.path.exists(test_path):
+                    file_path = test_path
+                    found = True
+                    break
+                # Try with just basename
+                test_path_base = os.path.join(bp, basename)
+                if os.path.exists(test_path_base):
+                    file_path = test_path_base
+                    found = True
+                    break
+            
+            if not found:
+                logger.error(f"❌ File not found: {file_path}")
+                return [], []
+
+        try:
+            # Determine file type
+            ext = os.path.splitext(file_path)[1].lower()
+            
+            if ext == '.csv':
+                df = pd.read_csv(file_path)
+            elif ext in ['.xlsx', '.xls']:
+                df = pd.read_excel(file_path)
+            else:
+                logger.error(f"❌ Unsupported file type: {ext}")
+                return [], []
+
+            # Clean and format data
+            df = df.where(pd.notnull(df), None) # Convert NaN to None
+            
+            # Ensure headers are strings and clean
+            headers = [str(h).strip() for h in df.columns.tolist()]
+            df.columns = headers
+            
+            rows_data = []
+            for idx, row in df.iterrows():
+                row_dict = row.to_dict()
+                rows_data.append({
+                    'data': row_dict,
+                    'row_number': idx + 2 # Header is Row 1
+                })
+                
+            return rows_data, headers
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to load file data: {e}")
+            return [], []
+
     def get_case_insensitive_value(self, data: Dict[str, Any], key: Optional[str]) -> Any:
         """Helper to get value from dictionary with case-insensitive and stripped key matching"""
         if not key:
@@ -83,14 +163,21 @@ class GoogleSheetsAutomationServiceUnofficial:
     def format_phone_number(self, phone_number: str) -> str:
         """
         Format phone number - removes all non-digit characters.
-        Does NOT prepends any country code by default to avoid hardcoding.
-        If the number starts with 0 and is 11 digits, it's treated as a local number and the 0 is removed.
+        🚀 IMPROVED: Handles strings with spaces by splitting and taking first valid segment.
         """
         if not phone_number:
             return ""
         
         # Convert to string and strip
         val = str(phone_number).strip()
+        
+        # 🔥 NEW: If contains spaces, take the first segment that looks like a number
+        if " " in val:
+            segments = val.split()
+            for seg in segments:
+                clean_seg = re.sub(r'\D', '', seg)
+                if 8 <= len(clean_seg) <= 16:
+                    return clean_seg
         
         # Remove all non-digit characters
         clean = re.sub(r'\D', '', val)
@@ -105,49 +192,82 @@ class GoogleSheetsAutomationServiceUnofficial:
         return clean
     
     async def process_all_active_triggers(self):
-        """Process all active triggers for all sheets - LEGACY METHOD FOR BACKWARD COMPATIBILITY"""
-        logger.warning("⚠️  LEGACY METHOD CALLED: process_all_active_triggers() - This should only be called via on-demand API")
+        """
+        🚀 Process all active triggers (Google Sheets AND Local Files)
+        Unofficial WhatsApp API only.
+        """
+        logger.info("🔍 [AUTOMATION] Starting polling cycle for all active triggers...")
         try:
-            # Check if google_sheets table exists
-            try:
-                self.db.execute(text("SELECT 1 FROM google_sheets LIMIT 1"))
-            except Exception as table_error:
-                logger.info(f"Google Sheets tables not found - skipping trigger processing: {str(table_error)}")
-                return
-            
-            # Get all active sheets
-            active_sheets = self.db.query(GoogleSheet).filter(
-                GoogleSheet.status == SheetStatus.ACTIVE
+            # 1. Get all enabled triggers
+            enabled_triggers = self.db.query(GoogleSheetTrigger).filter(
+                GoogleSheetTrigger.is_enabled == True
             ).all()
             
-            if not active_sheets:
-                logger.info("No active Google Sheets found for trigger processing")
+            if not enabled_triggers:
+                logger.info("ℹ️ No enabled triggers found in database.")
                 return
             
-            logger.info(f"🚀 Processing triggers for {len(active_sheets)} active sheets")
+            logger.info(f"🚀 Found {len(enabled_triggers)} enabled triggers to process.")
             
-            for sheet in active_sheets:
+            for trigger in enabled_triggers:
                 try:
-                    # 🔥 SYNC-IN-ASYNC FIX: Wrap blocking Google Sheets data fetch in thread
-                    rows_data, headers_data = await asyncio.to_thread(
-                        self.sheets_service.get_sheet_data_with_headers,
-                        spreadsheet_id=sheet.spreadsheet_id,
-                        worksheet_name=sheet.worksheet_name or "Sheet1"
-                    )
+                    rows_data = []
+                    headers_data = []
+                    sheet = None
                     
-                    await self.process_sheet_triggers(sheet, rows_data, headers_data)
+                    # CASE A: Google Sheet Based
+                    if trigger.sheet_id:
+                        sheet = self.db.query(GoogleSheet).filter(GoogleSheet.id == trigger.sheet_id).first()
+                        if not sheet or sheet.status != SheetStatus.ACTIVE:
+                            logger.warning(f"⚠️ Trigger {trigger.trigger_id} linked to missing or inactive sheet {trigger.sheet_id}")
+                            continue
+                        
+                        try:
+                            # Fetch Google Sheet data
+                            rows_data, headers_data = await asyncio.to_thread(
+                                self.sheets_service.get_sheet_data_with_headers,
+                                spreadsheet_id=sheet.spreadsheet_id,
+                                worksheet_name=sheet.worksheet_name or "Sheet1"
+                            )
+                        except Exception as sheet_err:
+                            logger.error(f"❌ Failed to fetch Google Sheet data for trigger {trigger.trigger_id}: {sheet_err}")
+                            continue
+
+                    # CASE B: Local File Based (CSV/Excel)
+                    elif trigger.source_file_url:
+                        try:
+                            rows_data, headers_data = self._load_local_file_data(trigger.source_file_url)
+                            if not rows_data and not headers_data:
+                                # This usually means file not found
+                                logger.warning(f"⚠️ Trigger {trigger.trigger_id}: File not found or empty. Auto-pausing trigger.")
+                                trigger.is_enabled = False
+                                self.db.commit()
+                                continue
+                        except Exception as file_err:
+                            logger.error(f"❌ Failed to load local file for trigger {trigger.trigger_id}: {file_err}")
+                            continue
                     
-                except Exception as sheet_error:
-                    logger.error(f"Error processing sheet {sheet.id}: {sheet_error}")
-                    # Release DB session if it's stuck
-                    if hasattr(self.db, 'rollback'):
-                         self.db.rollback()
+                    else:
+                        logger.warning(f"⚠️ Trigger {trigger.trigger_id} has neither sheet_id nor source_file_url - skipping")
+                        continue
+
+                    if not rows_data:
+                        # No data to process for this trigger
+                        continue
+                    
+                    # Process the trigger with the loaded data
+                    await self.process_single_trigger(sheet, trigger, rows_data, headers_data)
+                    
+                except Exception as trigger_loop_error:
+                    logger.error(f"❌ Error in trigger execution loop for {trigger.trigger_id}: {trigger_loop_error}")
                     continue
             
-            logger.info("✅ Completed processing all active sheets")
+            logger.info("✅ Completed polling cycle")
             
         except Exception as e:
-            logger.error(f"❌ Error in process_all_active_triggers: {e}")
+            logger.error(f"❌ Critical Error in process_all_active_triggers: {e}")
+            if hasattr(self.db, 'rollback'):
+                 self.db.rollback()
     
     async def process_sheet_triggers(self, sheet: GoogleSheet, rows_data: List[Dict[str, Any]], headers_data: List[str]):
         """
@@ -189,112 +309,114 @@ class GoogleSheetsAutomationServiceUnofficial:
         """
         Process a single trigger using unofficial WhatsApp API only
         """
+        # 🔥 1. INITIALIZE COUNTERS (Fix match_count crash)
+        match_count = 0
+        processed_count = 0
+        error_count = 0
+        invalid_rows = 0
+        total_rows = len(rows_data)
+
         try:
-            # Determine which device to use: trigger-specific or sheet-default
-            # Validate device exists and is connected (OR Round Robin is configured)
-            device_id = trigger.device_id or (sheet.device_id if sheet else None)
+            # 🔥 2. PUBLIC MODE DETECTION
+            is_public_mode = not getattr(self.sheets_service, 'has_real_credentials', False)
+            if is_public_mode:
+                logger.warning(f"⚠️ [AUTOMATION] Running in read-only (PUBLIC) mode for trigger {trigger.trigger_id}")
+
+            # 🔥 3. STRICT HEADER VALIDATION
+            headers = [str(h).strip() for h in headers_data]
+            headers_lower = [h.lower() for h in headers]
+            
+            # Check for corruption (headers containing numbers)
+            corrupted_headers = [h for h in headers if any(char.isdigit() for char in h)]
+            if corrupted_headers and len(corrupted_headers) > len(headers) / 2:
+                error_msg = f"❌ [VALIDATION ERROR] Sheet structure appears corrupted. Headers contain numbers: {corrupted_headers[:3]}"
+                logger.error(error_msg)
+                return
+
+            # Ensure 'Phone' column exists
+            phone_col = (trigger.phone_column or 'phone').strip().lower()
+            if phone_col not in headers_lower:
+                error_msg = f"❌ [VALIDATION ERROR] 'Phone' column missing. Trigger expected '{phone_col}', but headers are: {headers_lower}"
+                logger.error(error_msg)
+                return
+
+            # 🔥 4. DEVICE HANDLING (No silent fallback)
+            device_id = trigger.device_id or (getattr(sheet, 'device_id', None))
             multi_devices = (trigger.trigger_config or {}).get('multi_device_ids', [])
             
             if not device_id and not multi_devices:
-                logger.error(f"   ❌ Trigger {trigger.trigger_id} has no device_id assigned (and no multi-device Round Robin) - skipping")
+                logger.warning(f"   ⚠️ Trigger {trigger.trigger_id} has no device_id - skipping execution.")
                 return
             
-            # Use one of the multi-devices as the 'active_device_id' if primary is missing
-            # (Note: process_row_for_trigger handles the actual rotation)
             if not device_id and multi_devices:
                 device_id = multi_devices[0]
-                logger.info(f"   ℹ️ Primary device missing. Using first Round Robin device for validation: {device_id}")
-            
-            # Only proceed if we have rows data to check
-            if not rows_data:
-                # logger.info(f"   ℹ️ Trigger {trigger.trigger_id}: No data in sheet. Skipping.")
-                return
-                
-            # 🔥 OPTIMIZATION: Check for rows first to avoid slamming the Engine health check every 10 seconds
-            # We only need to check the device if we have something that MIGHT send.
-            # (Note: In trigger mode, we iterate rows below)
-            
-            # Identify message owner (fallback to trigger.user_id if no sheet)
-            triggered_by_user_id = trigger.user_id or (sheet.user_id if sheet else None)
-            
+
+            # Identify message owner
+            triggered_by_user_id = trigger.user_id or (getattr(sheet, 'user_id', None))
             if not triggered_by_user_id:
-                logger.error(f"   ❌ Trigger {trigger.trigger_id} has no user_id or sheet associated - skipping")
+                logger.error(f"   ❌ Trigger {trigger.trigger_id} has no user_id - skipping")
                 return
 
-            # For better visibility, let's log the trigger start
-            logger.info(f"🎯 [AUTOMATION] Processing Trigger: {trigger.trigger_id} ({trigger.trigger_type}) for user {triggered_by_user_id}")
+            logger.info(f"🎯 [AUTOMATION] Processing Trigger: {trigger.trigger_id} ({trigger.trigger_type})")
             
-            # 🔥 GLOBAL SCHEDULING CHECK (IST Aware)
+            # Schedule check (Existing logic preserved)
             if trigger.trigger_type == "time" and trigger.scheduled_at:
-                # 1. The database stores '13:38:00+00:00' because of Pydantic default
-                # 2. We interpret this literal '13:38' as Indian Standard Time (IST)
                 ist_tz = timezone(timedelta(hours=5, minutes=30))
                 literal_time = trigger.scheduled_at.replace(tzinfo=None)
-                
-                # Convert the literal IST time to a real UTC timestamp for accurate comparison
                 sched_time_utc = literal_time.replace(tzinfo=ist_tz).astimezone(timezone.utc)
-                
                 now_utc = datetime.now(timezone.utc)
                 
-                # Check if it's too early
                 if now_utc < sched_time_utc:
-                    # Clearer logging for debugging
                     diff = sched_time_utc - now_utc
                     minutes_left = int(diff.total_seconds() / 60)
                     if minutes_left < 60:
-                        logger.info(f"   ⏳ [IST/UTC] Trigger {trigger.trigger_id} waiting: {minutes_left} minutes until {literal_time.strftime('%H:%M')} IST")
+                        logger.info(f"   ⏳ Trigger {trigger.trigger_id} waiting: {minutes_left}m until {literal_time.strftime('%H:%M')} IST")
                     return
-                else:
-                    logger.info(f"   🚀 Global schedule reached for {trigger.trigger_id} ({literal_time.strftime('%H:%M')} IST)!")
-            
-            # Get Device ID - Handle fallback logic once per poll if rows exist
+
+            # Device Validation & Fallback (Only if explicitly handled)
             active_device_id = device_id
-            
-            logger.info(f"🔍 [AUTOMATION] Validating device {active_device_id}...")
             device_validation = validate_device_before_send(self.db, active_device_id, user_id=triggered_by_user_id)
             
             if not device_validation["valid"]:
                 logger.warning(f"   ⚠️ Primary device {active_device_id} issues: {device_validation.get('error')}. Checking Fallback...")
-                fallback_candidates = self.db.query(Device).filter(
-                    Device.busi_user_id == triggered_by_user_id
-                ).all()
+                fallback_candidates = self.db.query(Device).filter(Device.busi_user_id == triggered_by_user_id).all()
                 fallback_device_id = None
                 
                 for candidate in fallback_candidates:
-                    # Validate candidate against truth (engine) and auto-heal local db status
                     candidate_valid = validate_device_before_send(self.db, candidate.device_id, user_id=triggered_by_user_id)
                     if candidate_valid["valid"]:
                         fallback_device_id = candidate.device_id
                         break
 
                 if fallback_device_id:
-                    logger.info(f"   ✅ Using fallback: {fallback_device_id}")
                     active_device_id = fallback_device_id
                 else:
-                    logger.error(f"   ❌ No connected devices found for user {sheet.user_id}. Cannot process triggers.")
+                    logger.error(f"   ❌ No connected devices found for user {triggered_by_user_id}. Skipping trigger.")
                     return
 
-            processed_count = 0
-            match_count = 0
-            logger.info(f"📊 [AUTOMATION] Scanning {len(rows_data)} rows for trigger conditions...")
+            # 🔥 5. ROW PROCESSING LOOP (SAFE)
+            logger.info(f"📊 [AUTOMATION] Scanning {total_rows} rows...")
             
             for row in rows_data:
                 try:
-                    # Process row and get result (Dict[str, Any])
+                    # Process row
                     res = await self.process_row_for_trigger(sheet, trigger, row, active_device_id, headers=headers_data)
                     
-                    # Log and track result if it's a dictionary
                     if isinstance(res, dict):
                         if res.get("match"):
                             match_count += 1
                         if res.get("processed"):
                             processed_count += 1
+                        if res.get("reason") == "no_phone" or res.get("reason") == "invalid_phone":
+                            invalid_rows += 1
                     else:
-                        logger.warning(f"   ⚠️ Row {row.get('row_number')} returned unexpected result type: {type(res)}")
-                except Exception as e:
-                    logger.error(f"   ❌ Row {row.get('row_number')} error: {e}")
+                        error_count += 1
+                except Exception as row_e:
+                    logger.error(f"   ❌ Error processing row {row.get('row_number')}: {row_e}")
+                    error_count += 1
+                    continue
             
-            # Update last processed row / last trigger time
+            # Update last processed states
             if trigger.trigger_type == "new_row" and rows_data:
                 max_row = max(row.get('row_number', 0) for row in rows_data)
                 trigger.last_processed_row = max(trigger.last_processed_row, max_row)
@@ -302,7 +424,19 @@ class GoogleSheetsAutomationServiceUnofficial:
             trigger.last_triggered_at = datetime.now(timezone.utc)
             self.db.commit()
             
-            logger.info(f"✅ [AUTOMATION] Trigger {trigger.trigger_id} complete: {match_count} matches, {processed_count} successfully processed.")
+            # 🔥 6. FINAL REPORT (User requested)
+            report = f"""
+📈 [FINAL REPORT] Trigger {trigger.trigger_id}
+-----------------------------------
+Total Rows:    {total_rows}
+Valid Rows:    {total_rows - invalid_rows}
+Invalid Rows:  {invalid_rows}
+Matches Found: {match_count}
+Sent/Processed: {processed_count}
+Errors:        {error_count}
+-----------------------------------
+"""
+            logger.info(report)
             
         except Exception as e:
             logger.error(f"   ❌ [AUTOMATION] Trigger {trigger.trigger_id} failed: {e}")
@@ -328,34 +462,63 @@ class GoogleSheetsAutomationServiceUnofficial:
                 return {"processed": False, "reason": "empty_row"}
 
             # 🔥 NEW: Early Local History Check (Crucial for Public Mode)
-            # If we've already handled this row locally, skip it immediately without scanning again.
+            # If we've already handled this row locally, skip it immediately unless data changed or manually reset
             try:
-                # Search for any record for this trigger + row
-                history_exists = self.db.query(GoogleSheetTriggerHistory).filter(
+                # Search for records for this trigger + row
+                history_records = self.db.query(GoogleSheetTriggerHistory).filter(
                     GoogleSheetTriggerHistory.trigger_id == str(trigger.trigger_id)
                 ).all()
                 
-                already_handled_locally = False
-                for h in history_exists:
+                trigger_match_value = str(trigger.trigger_value or "Send").strip().lower()
+                status_column = trigger.status_column or 'Status'
+                current_raw_status = self.get_case_insensitive_value(row_data, status_column)
+                current_normalized_status = str(current_raw_status or "").strip().lower()
+
+                for h in history_records:
                     if h.row_data and h.row_data.get('row_number') == row_number:
-                        # 🔥 IMPROVEMENT: Only skip if it was successfully SENT
-                        # If it previously FAILED or EXPIRED, allow retry if time is updated
-                        if h.status == "sent":
-                            already_handled_locally = True
-                            break
-                
-                
-                if already_handled_locally:
-                    # Log the skip clearly so the user knows WHY nothing is happening
-                    logger.info(f"   Row {row_number}: Already handled in DASHBOARD HISTORY. (Skip)")
-                    return {"processed": False, "reason": "already_handled_locally"}
+                        # 1. Check if it's an EXACT duplicate that was recently sent
+                        # We compare the data (excluding the status column)
+                        prev_data = h.row_data.get('data', {})
+                        
+                        # Remove status from comparison
+                        curr_comp_data = {k: v for k, v in row_data.items() if k.lower() != status_column.lower()}
+                        prev_comp_data = {k: v for k, v in prev_data.items() if k.lower() != status_column.lower()}
+                        
+                        is_exact_data_duplicate = (curr_comp_data == prev_comp_data)
+                        
+                        # If it's the exact same content and it was already sent...
+                        if is_exact_data_duplicate and h.status == "sent":
+                            # EXCEPT if the user has manually set the status back to the trigger value
+                            # and it's been more than 10 minutes (to prevent infinite loops in Public Mode)
+                            if current_normalized_status == trigger_match_value:
+                                ten_min_ago = datetime.now(timezone.utc) - timedelta(minutes=10)
+                                if h.triggered_at and h.triggered_at.replace(tzinfo=timezone.utc) < ten_min_ago:
+                                    logger.info(f"   🔄 Row {row_number}: Manual reset detected (Trigger value '{current_raw_status}' after 10m). Re-processing.")
+                                    # We don't break, we allow it to proceed to the next checks
+                                    continue
+                                else:
+                                    # It's an exact duplicate and too recent
+                                    logger.info(f"   Row {row_number}: ⏭️ Skipped (Duplicate content sent {h.triggered_at}. Cooldown 10m active.)")
+                                    return {"processed": False, "match": True, "reason": "duplicate_prevented"}
+                            else:
+                                logger.info(f"   Row {row_number}: ⏭️ Skipped (Already handled recently)")
+                                return {"processed": False, "match": True, "reason": "already_handled_locally"}
+                        
+                        # 2. If data has CHANGED, we allow it even if previously sent
+                        if not is_exact_data_duplicate and h.status == "sent":
+                             logger.info(f"   📝 Row {row_number}: Data change detected. Re-processing trigger.")
+                             continue
+
             except Exception as hist_err:
-                logger.warning(f"   ⚠️ Row {row_number}: Local history check error: {hist_err}")
+                logger.warning(f"   ⚠️ Row {row_number}: Smart history check error: {hist_err}")
 
             # Skip if already processed (Only for new_row triggers)
             if trigger.trigger_type == "new_row" and row_number <= trigger.last_processed_row:
                 logger.debug(f"   Row {row_number}: Skipped (Already processed: {trigger.last_processed_row})")
                 return {"processed": False, "reason": "already_processed"}
+            
+            # Identify message owner
+            row_owner_id = str(getattr(sheet, 'user_id', trigger.user_id))
             
             logger.info(f"   Row {row_number}: Inspecting row data: {row_data}")
             
@@ -365,13 +528,15 @@ class GoogleSheetsAutomationServiceUnofficial:
             normalized_status = str(raw_status or "").strip().lower()
             
             # 1. Skip if already marked as finished in the sheet
-            ALREADY_HANDLED = ['sent', 'send', 'processing', 'success', 'delivered', 'done', 'failed', 'expired']
-            if normalized_status in ALREADY_HANDLED:
+            # 🔥 FIX: Remove 'send' and 'sent' from defensive skip if they are the trigger value!
+            ALREADY_HANDLED = ['processing', 'success', 'delivered', 'done', 'failed', 'expired']
+            if normalized_status in ALREADY_HANDLED and normalized_status != str(trigger.trigger_value or "").lower():
                 # No need to log this every time for every column
                 return {"processed": False, "reason": "already_handled"}
             
             # 2. Check in-memory lock (prevent concurrency issues)
-            row_lock_key = f"{sheet.id}_{row_number}"
+            # Use trigger_id + row_number to be unique across sheets and files
+            row_lock_key = f"trig_{trigger.trigger_id}_row_{row_number}"
             if row_lock_key in self._processing_rows:
                 logger.warning(f"   Row {row_number}: Skipped (Already being processed in this cycle)")
                 return {"processed": False, "reason": "already_processing_memory"}
@@ -506,7 +671,8 @@ class GoogleSheetsAutomationServiceUnofficial:
                             await self.create_trigger_history(
                                 sheet, trigger, row_number, "", "", TriggerHistoryStatus.FAILED, 
                                 f"Time expired (>24h window). Missed window for {send_time_utc}",
-                                device_id=device_id
+                                device_id=device_id,
+                                full_row_data=row_data
                             )
                             # Update sheet status to Expired 
                             await self.update_sheet_status(sheet, row_number, trigger.status_column, 'Expired')
@@ -520,18 +686,35 @@ class GoogleSheetsAutomationServiceUnofficial:
                         await self.create_trigger_history(
                             sheet, trigger, row_number, "", "", TriggerHistoryStatus.FAILED, 
                             f"Invalid time format: {send_time_value}",
-                            device_id=device_id
+                            device_id=device_id,
+                            full_row_data=row_data
                         )
                         return {"processed": False, "reason": "invalid_time"}
                 
                 else:
                     # Status-based trigger
-                    trigger_value = str(trigger.trigger_value or 'Send').strip().lower()
-                    if normalized_status != trigger_value:
-                        logger.info(f"   Row {row_number}: Status '{normalized_status}' != trigger '{trigger_value}'")
-                        return {"processed": False, "reason": "status_mismatch"}
+                    # 🔥 USER REQUESTED EXACT LOGIC:
+                    status_col_name = trigger.status_column or 'Status'
+                    raw_status = self.get_case_insensitive_value(row_data, status_col_name)
                     
-                    logger.info(f"   🎯 Row {row_number}: Status matches trigger value")
+                    normalized_status = str(raw_status or "").strip().lower()
+                    valid_status = ["send", "yes", "true", "1"]
+                    
+                    # [ROW DEBUG] Logging
+                    match_result = "NO"
+                    if normalized_status in valid_status:
+                        match_result = "YES"
+                        process_row = True
+                    else:
+                        process_row = False
+                    
+                    logger.info(f"\n[ROW DEBUG]\nRow: {row_number}\nRaw Status: \"{raw_status}\"\nCleaned: \"{normalized_status}\"\nMatch: {match_result}")
+                    
+                    if not process_row:
+                        logger.info(f"   Row {row_number}: ⏭️ Skipped بسبب Status mismatch ('{raw_status}')")
+                        return {"processed": False, "match": False, "reason": "status_mismatch"}
+                    
+                    logger.info(f"   🎯 Row {row_number}: Match found! Status '{raw_status}' matched.")
                 
                 # Extract phone number
                 phone_column = trigger.phone_column or 'phone'
@@ -587,7 +770,7 @@ class GoogleSheetsAutomationServiceUnofficial:
                 elif not message:
                     error_msg = "No message content available"
                     logger.error(f"   ❌ Row {row_number}: {error_msg}")
-                    await self.create_trigger_history(sheet, trigger, row_number, formatted_phone, "", TriggerHistoryStatus.FAILED, error_msg, device_id=device_id)
+                    await self.create_trigger_history(sheet, trigger, row_number, formatted_phone, "", TriggerHistoryStatus.FAILED, error_msg, device_id=device_id, full_row_data=row_data)
                     return {"processed": False, "reason": "no_message"}
 
                 # 2. Handle Multi-Device Rotation
@@ -612,58 +795,78 @@ class GoogleSheetsAutomationServiceUnofficial:
                         logger.info(f"   ⏳ [STAGGERED] Waiting {delay:.1f}s before sending next...")
                         await asyncio.sleep(delay)
 
-                # 🔥 RACE CONDITION FIX: Fetch the LATEST status right before processing
+                # 🔥 RACE CONDITION FIX: Fetch the LATEST status right before processing (Sheets Only)
                 status_column = trigger.status_column or 'Status'
-                try:
-                    # Clear cache to get fresh data
-                    cache_key = f"{sheet.spreadsheet_id}:{sheet.worksheet_name or 'Sheet1'}"
-                    if cache_key in self.sheets_service._sheet_cache:
-                        del self.sheets_service._sheet_cache[cache_key]
-                    
-                    fresh_rows, _ = await asyncio.to_thread(
-                        self.sheets_service.get_sheet_data_with_headers,
-                        sheet.spreadsheet_id,
-                        sheet.worksheet_name
-                    )
-                    
-                    matching_row = next((r for r in fresh_rows if r['row_number'] == row_number), None)
-                    if matching_row:
-                        latest_status = str(self.get_case_insensitive_value(matching_row['data'], status_column) or "").strip().lower()
-                        if latest_status in ALREADY_HANDLED:
-                            logger.info(f"   Row {row_number}: 🛑 SKIPPED - Status changed to '{latest_status}' by another process.")
-                            return {"processed": False, "reason": "already_handled_race_win"}
-                except Exception as e:
-                    logger.warning(f"   ⚠️ Row {row_number}: Could not verify fresh status: {e}")
+                if sheet and sheet.spreadsheet_id:
+                    try:
+                        # Clear cache to get fresh data
+                        cache_key = f"{sheet.spreadsheet_id}:{sheet.worksheet_name or 'Sheet1'}"
+                        if cache_key in self.sheets_service._sheet_cache:
+                            del self.sheets_service._sheet_cache[cache_key]
+                        
+                        fresh_rows, _ = await asyncio.to_thread(
+                            self.sheets_service.get_sheet_data_with_headers,
+                            sheet.spreadsheet_id,
+                            sheet.worksheet_name
+                        )
+                        
+                        matching_row = next((r for r in fresh_rows if r['row_number'] == row_number), None)
+                        if matching_row:
+                            latest_status = str(self.get_case_insensitive_value(matching_row['data'], status_column) or "").strip().lower()
+                            if latest_status in ALREADY_HANDLED:
+                                logger.info(f"   Row {row_number}: 🛑 SKIPPED - Status changed to '{latest_status}' by another process.")
+                                return {"processed": False, "reason": "already_handled_race_win"}
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ Row {row_number}: Could not verify fresh status: {e}")
 
                 # Step 1: Update sheet status to "Processing"
-                # 🔥 SAFETY: If we can't update to "Processing", we check internal history as a fallback
-                status_updated = await self.update_sheet_status(sheet, row_number, status_column, "Processing", headers)
+                # 🔥 SAFETY: Respect Public Mode or File-based (No Update)
+                if not sheet:
+                    logger.info(f"   ✨ Row {row_number}: [FILE-BASED] Skipping sheet status update")
+                    status_updated = True
+                elif not getattr(self.sheets_service, 'has_real_credentials', False):
+                    logger.info(f"   ✨ Row {row_number}: [PUBLIC MODE] Skipping sheet status update to 'Processing'")
+                    status_updated = True # Bypassed
+                else:
+                    status_updated = await self.update_sheet_status(sheet, row_number, status_column, "Processing", headers)
                 
                 if not status_updated:
-                    # In Public Mode, we already did the history check at the very beginning of process_row_for_trigger.
-                    # If we reached here, it means it's definitely a new row that needs sending.
-                    if not getattr(self.sheets_service, 'has_real_credentials', False):
-                        logger.info(f"   ✨ Row {row_number}: Public Bypass Mode active. Proceeding with send...")
-                    else:
-                        logger.warning(f"   ⚠️ Row {row_number}: Skipping send because sheet status could not be updated to 'Processing'")
-                        return {"processed": False, "reason": "status_update_failed"}
+                    logger.warning(f"   ⚠️ Row {row_number}: Skipping send because sheet status could not be updated to 'Processing'")
+                    return {"processed": False, "reason": "status_update_failed"}
                 
                 # Step 2: Send WhatsApp message via unified service (to handle credits)
                 try:
                     logger.info(f"   📤 Sending WhatsApp message for row {row_number} (Credit Aware)")
                     logger.info(f"   Phone: {formatted_phone}")
                     logger.info(f"   Device: {device_id}")
-                    logger.info(f"   User ID: {sheet.user_id}")
+                    logger.info(f"   User ID: {row_owner_id}")
                     
                     # Create unified message request with media support
                     message_type = MessageType.TEXT
                     media_url = None
                     
-                    # Check if trigger has media attached
-                    logger.info(f"   Checking media - trigger.media_url: {trigger.media_url}, trigger.media_type: {trigger.media_type}")
-                    if trigger.media_url and trigger.media_type:
-                        # Normalize media type to match MessageType enum
-                        media_type_lower = trigger.media_type.lower().strip()
+                    # 🔥 IMPROVED MEDIA PROCESSING & VALIDATION
+                    message_type = MessageType.TEXT
+                    media_url = None
+                    
+                    if trigger.media_url:
+                        media_detected = True
+                        logger.info(f"   📎 Media detected: {trigger.media_url}")
+                        
+                        # 1. Detect media type
+                        media_type_lower = (trigger.media_type or "").lower().strip()
+                        if not media_type_lower:
+                            # Try to detect from URL extension
+                            ext = os.path.splitext(trigger.media_url)[1].lower()
+                            if ext in ['.jpg', '.jpeg', '.png', '.gif']:
+                                media_type_lower = 'image'
+                            elif ext in ['.mp4', '.avi', '.mov']:
+                                media_type_lower = 'video'
+                            elif ext in ['.mp3', '.wav', '.ogg']:
+                                media_type_lower = 'audio'
+                            else:
+                                media_type_lower = 'document'
+                        
                         if media_type_lower in ['image', 'images', 'jpg', 'jpeg', 'png', 'gif']:
                             message_type = MessageType.IMAGE
                         elif media_type_lower in ['video', 'videos', 'mp4', 'avi', 'mov']:
@@ -673,18 +876,32 @@ class GoogleSheetsAutomationServiceUnofficial:
                         else:
                             message_type = MessageType.DOCUMENT
                         
-                        # Convert HTTP URL back to local path for engine service
+                        # 2. Normalize and check path
                         media_url = trigger.media_url
                         if media_url.startswith('http://localhost:8000/uploads/'):
-                            media_url = media_url.replace('http://localhost:8000/uploads/', 'uploads/')
+                            media_path = media_url.replace('http://localhost:8000/uploads/', 'uploads/')
                         elif media_url.startswith('http://127.0.0.1:8000/uploads/'):
-                            media_url = media_url.replace('http://127.0.0.1:8000/uploads/', 'uploads/')
+                            media_path = media_url.replace('http://127.0.0.1:8000/uploads/', 'uploads/')
+                        else:
+                            media_path = media_url
                             
-                        logger.info(f"   Including media: {message_type.value} from {trigger.media_url} -> {media_url}")
+                        # 3. Path Accessibility Validation
+                        if os.path.exists(media_path):
+                            logger.info(f"   ✅ Media file validated and accessible: {media_path}")
+                            media_url = media_path
+                        else:
+                            # If it's a real HTTP URL (remote), we keep it as is, otherwise log warning
+                            if not media_url.startswith('http'):
+                                logger.warning(f"   ⚠️ Media file not found or inaccessible at path: {media_path}")
+                                # We'll still try to send it, the engine will handle the final error
+                        
+                        media_payload = {
+                            "type": message_type.value,
+                            "file": media_url
+                        }
+                        logger.info(f"   Media payload structured: {media_payload}")
                     else:
-                        message_type = MessageType.TEXT
-                        media_url = None
-                        logger.info(f"   No media attached - sending text only")
+                        logger.info(f"   No media detected - sending text only")
                     
                     msg_request = UnifiedMessageRequest(
                         to=formatted_phone,
@@ -692,7 +909,7 @@ class GoogleSheetsAutomationServiceUnofficial:
                         message=message,
                         media_url=media_url,
                         device_id=str(device_id),
-                        user_id=str(sheet.user_id)
+                        user_id=row_owner_id
                     )
                     
                     logger.info(f"   Created message request - type: {message_type}, media_url: {media_url}")
@@ -714,7 +931,8 @@ class GoogleSheetsAutomationServiceUnofficial:
                         await self.create_trigger_history(
                             sheet, trigger, row_number, formatted_phone, message, 
                             TriggerHistoryStatus.SENT, message_id=send_response.message_id,
-                            device_id=device_id
+                            device_id=device_id,
+                            full_row_data=row_data
                         )
                         
                         logger.info(f"   ✅ Row {row_number}: Message sent successfully via Unified Service")
@@ -751,7 +969,8 @@ class GoogleSheetsAutomationServiceUnofficial:
                     await self.create_trigger_history(
                         sheet, trigger, row_number, formatted_phone, message, 
                         TriggerHistoryStatus.FAILED, error_message=error_msg,
-                        device_id=device_id
+                        device_id=device_id,
+                        full_row_data=row_data
                     )
                     
                     logger.error(f"   ❌ Row {row_number}: Send failed - {error_msg}")
@@ -775,6 +994,10 @@ class GoogleSheetsAutomationServiceUnofficial:
         Returns True if update succeeded, False otherwise
         """
         try:
+            if not sheet or not sheet.spreadsheet_id:
+                # For file-based triggers, we skip sheet status update by returning True
+                return True
+
             # 🔥 SILENT SKIP IN PUBLIC MODE: Provide a helpful hint
             if not getattr(self.sheets_service, 'has_real_credentials', False):
                  logger.info(f"   ℹ️ Row {row_number}: Status '{status}' saved to your DASHBOARD (Spreadsheet is READ-ONLY in Public Mode).")
@@ -801,21 +1024,22 @@ class GoogleSheetsAutomationServiceUnofficial:
                 return False
         except Exception as e:
             # Only log error if we have credentials
-            if getattr(self.sheets_service, 'has_real_credentials', False):
+            if sheet and getattr(self.sheets_service, 'has_real_credentials', False):
                 logger.error(f"   ❌ Error updating sheet status for row {row_number}: {e}")
             return False
     
     async def create_trigger_history(self, sheet: GoogleSheet, trigger: GoogleSheetTrigger, 
                                  row_number: int, phone: str, message: str, 
                                  status: TriggerHistoryStatus, message_id: Optional[str] = None, 
-                                 error_message: Optional[str] = None, device_id: Any = None):
+                                 error_message: Optional[str] = None, device_id: Any = None,
+                                 full_row_data: Optional[Dict[str, Any]] = None):
         """
         Save trigger history after every row
         """
         try:
             from datetime import datetime
             history = GoogleSheetTriggerHistory(
-                sheet_id=sheet.id,
+                sheet_id=getattr(sheet, 'id', None),
                 trigger_id=str(trigger.trigger_id),  # ✅ Cast UUID to string
                 device_id=str(device_id or trigger.device_id), # ✅ Cast to string
                 phone_number=phone,
@@ -826,7 +1050,8 @@ class GoogleSheetsAutomationServiceUnofficial:
                 row_data={
                     "row_number": row_number,
                     "trigger_id": str(trigger.trigger_id),
-                    "message_id": message_id
+                    "message_id": message_id,
+                    "data": full_row_data # 🔥 STORE FULL DATA FOR CHANGE DETECTION
                 }
             )
             

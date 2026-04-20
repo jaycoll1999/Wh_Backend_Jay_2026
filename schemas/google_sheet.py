@@ -82,7 +82,7 @@ class GoogleSheetMessagingRequest(BaseModel):
         return v
 
 class TriggerCreateRequest(BaseModel):
-    sheet_id: Optional[UUID] = None
+    sheet_id: Optional[Union[UUID, str]] = None
     device_id: Optional[Union[str, UUID]] = None  # Made optional
     trigger_type: str
     is_enabled: Optional[bool] = True
@@ -98,12 +98,20 @@ class TriggerCreateRequest(BaseModel):
     send_time_column: Optional[str] = None
     message_column: Optional[str] = None
     scheduled_at: Optional[datetime] = None
+    source_type: Optional[str] = "google_sheet" # NEW: "google_sheet" or "file"
     source_file_url: Optional[str] = None
     media_url: Optional[str] = None
     media_type: Optional[str] = None
     # Round Robin fields
     multi_device_ids: Optional[List[str]] = None
     multi_templates: Optional[List[str]] = None
+
+    @field_validator('sheet_id')
+    @classmethod
+    def validate_sheet_id(cls, v):
+        if v in ["none", "null", "undefined", "file", ""]:
+            return None
+        return v
 
 # ✅ NEW: Official Template Trigger Request for Google Sheets
 class OfficialTemplateTriggerRequest(BaseModel):
@@ -219,6 +227,7 @@ class TriggerResponse(BaseModel):
     message_column: Optional[str] = None
     webhook_url: Optional[str] = None
     scheduled_at: Optional[datetime] = None
+    source_type: Optional[str] = "google_sheet" # NEW: "google_sheet" or "file"
     media_url: Optional[str] = None
     media_type: Optional[str] = None
     # Round Robin fields

@@ -139,6 +139,7 @@ async def auto_migrate_db():
         def fix_nullable():
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE google_sheet_triggers ALTER COLUMN sheet_id DROP NOT NULL;"))
+                conn.execute(text("ALTER TABLE sheet_trigger_history ALTER COLUMN sheet_id DROP NOT NULL;"))
         await run_in_threadpool(fix_nullable)
     except Exception: pass
     

@@ -1348,17 +1348,14 @@ async def list_all_user_triggers(
         
         # Get triggers for these sheets OR triggers with source_file_url 
         # For now, we fetch triggers where sheet_id is in user_sheets OR source_file_url is set
-        # (Assuming file triggers belong to the one who created them)
-        query = db.query(GoogleSheetTrigger)
-        if sheet_ids:
-            query = query.filter(
-                or_(
-                    GoogleSheetTrigger.sheet_id.in_(sheet_ids),
-                    GoogleSheetTrigger.source_file_url != None
-                )
+        # OR where user_id matches explicitly
+        query = db.query(GoogleSheetTrigger).filter(
+            or_(
+                GoogleSheetTrigger.sheet_id.in_(sheet_ids) if sheet_ids else False,
+                GoogleSheetTrigger.source_file_url != None,
+                GoogleSheetTrigger.user_id == str(current_user.busi_user_id)
             )
-        else:
-            query = query.filter(GoogleSheetTrigger.source_file_url != None)
+        )
             
         triggers = query.order_by(GoogleSheetTrigger.created_at.desc()).all()
         logger.info(f"🔍 Found {len(triggers)} triggers/automations")
@@ -1391,7 +1388,10 @@ async def list_all_user_triggers(
                 created_at=trigger.created_at,
                 device_name=d_name, 
                 sheet_name=s_name,
-                scheduled_at=trigger.scheduled_at
+                scheduled_at=trigger.scheduled_at,
+                source_file_url=trigger.source_file_url,
+                media_url=trigger.media_url,
+                media_type=trigger.media_type
             ))
         
         return result
@@ -1399,11 +1399,147 @@ async def list_all_user_triggers(
         logger.error(f"Error listing all triggers: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve triggers")
 
+@router.post("/triggers", response_model=TriggerResponse)
+async def create_standalone_trigger(
+    payload: str = Form(...),
+    file: Optional[UploadFile] = File(None),
+    data_file: Optional[UploadFile] = File(None), # 🔥 CSV/Excel data source
+    current_user: BusiUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    🔥 CREATE STANDALONE TRIGGER (File-based or Sheet-based via payload)
+    
+    Allows creating a trigger without sheet_id in URL.
+    """
+    import json
+    import os
+    import shutil
+    try:
+        # 0. Parse JSON payload
+        try:
+            request_dict = json.loads(payload)
+            request = TriggerCreateRequest(**request_dict)
+        except Exception as e:
+            logger.error(f"Invalid JSON payload: {e}")
+            raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {str(e)}")
+
+        # 1. Handle File Upload (Media)
+        media_url = None
+        media_type = None
+        if file:
+            logger.info(f"📁 Handling trigger media upload: {file.filename}")
+            upload_dir = os.path.join("uploads", "trigger_media")
+            os.makedirs(upload_dir, exist_ok=True)
+            
+            file_ext = os.path.splitext(file.filename)[1]
+            unique_filename = f"trigger_{uuid.uuid4()}_{file.filename}"
+            file_path = os.path.join(upload_dir, unique_filename)
+            
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            
+            media_url = f"http://localhost:8000/uploads/trigger_media/{unique_filename}"
+            
+            content_type = file.content_type or ""
+            if "image" in content_type: media_type = "image"
+            elif "video" in content_type: media_type = "video"
+            elif "audio" in content_type: media_type = "audio"
+            else: media_type = "document"
+
+        # 1.5 Handle Data File Upload (Source)
+        source_file_url = request.source_file_url
+        if data_file:
+            logger.info(f"📁 Handling DATA SOURCE file: {data_file.filename}")
+            upload_dir = os.path.join("uploads", "campaign_data")
+            os.makedirs(upload_dir, exist_ok=True)
+            
+            file_ext = os.path.splitext(data_file.filename)[1].lower()
+            unique_filename = f"data_{uuid.uuid4()}{file_ext}"
+            file_path = os.path.join(upload_dir, unique_filename)
+            
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(data_file.file, buffer)
+            
+            # Use absolute path for backend service processing
+            source_file_url = os.path.abspath(file_path)
+            logger.info(f"✅ Data source saved: {source_file_url}")
+
+        # 2. Validate sheet if provided in payload
+        sheet = None
+        if request.sheet_id:
+            sheet = validate_sheet_ownership(db, str(request.sheet_id), current_user.busi_user_id)
+        
+        dev_id_str = str(request.device_id) if request.device_id else None
+
+        # 3. Create the trigger
+        new_trigger = GoogleSheetTrigger(
+            trigger_id=str(uuid.uuid4()),
+            sheet_id=sheet.id if sheet else request.sheet_id,
+            user_id=str(current_user.busi_user_id),
+            device_id=dev_id_str,
+            trigger_type=request.trigger_type,
+            message_template=request.message_template,
+            phone_column=request.phone_column,
+            trigger_column=request.trigger_column,
+            status_column=request.status_column or "Status",
+            trigger_value=request.trigger_value,
+            is_enabled=request.is_enabled,
+            webhook_url=request.webhook_url,
+            send_time_column=request.send_time_column,
+            message_column=request.message_column,
+            scheduled_at=request.scheduled_at,
+            source_file_url=source_file_url,
+            media_url=media_url or request.media_url,
+            media_type=media_type or request.media_type,
+            trigger_config={
+                "interval": request.execution_interval or 15,
+                "schedule_column": request.schedule_column,
+                "multi_device_ids": [str(d) for d in request.multi_device_ids] if request.multi_device_ids else [],
+                "multi_templates": request.multi_templates or []
+            } if (request.execution_interval or request.schedule_column or request.multi_device_ids or request.multi_templates) else None
+        )
+        
+        db.add(new_trigger)
+        db.commit()
+        db.refresh(new_trigger)
+        
+        # 🚀 AUTO-START
+        t_id = str(new_trigger.trigger_id)
+        if t_id not in active_trigger_tasks or active_trigger_tasks[t_id].done():
+            task = asyncio.create_task(_trigger_worker_task(t_id))
+            active_trigger_tasks[t_id] = task
+            
+        device = db.query(Device).filter(Device.device_id == dev_id_str).first() if dev_id_str else None
+        
+        return TriggerResponse(
+            trigger_id=new_trigger.trigger_id,
+            sheet_id=new_trigger.sheet_id,
+            device_id=new_trigger.device_id,
+            trigger_type=new_trigger.trigger_type,
+            message_template=new_trigger.message_template,
+            phone_column=new_trigger.phone_column,
+            trigger_column=new_trigger.trigger_column,
+            trigger_value=new_trigger.trigger_value,
+            webhook_url=new_trigger.webhook_url,
+            is_enabled=new_trigger.is_enabled,
+            last_triggered_at=new_trigger.last_triggered_at,
+            created_at=new_trigger.created_at,
+            device_name=device.device_name if device else "Official API",
+            sheet_name=sheet.sheet_name if sheet else (f"File: {os.path.basename(new_trigger.source_file_url or '')[:20]}" if new_trigger.source_file_url else "Standalone")
+        )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error creating standalone trigger: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create trigger: {str(e)}")
+
+
 @router.post("/{sheet_id}/triggers", response_model=TriggerResponse)
 async def create_trigger(
     sheet_id: str,
     payload: str = Form(...),
     file: Optional[UploadFile] = File(None),
+    data_file: Optional[UploadFile] = File(None), # 🔥 CSV/Excel data source
     current_user: BusiUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -1450,8 +1586,37 @@ async def create_trigger(
             
             logger.info(f"✅ Media saved: {media_url} ({media_type})")
 
+        # 1.5 Handle Data File Upload (Source)
+        source_file_url = request.source_file_url
+        if data_file:
+            logger.info(f"📁 Handling DATA SOURCE file: {data_file.filename}")
+            upload_dir = os.path.join("uploads", "campaign_data")
+            os.makedirs(upload_dir, exist_ok=True)
+            
+            file_ext = os.path.splitext(data_file.filename)[1].lower()
+            unique_filename = f"data_{uuid.uuid4()}{file_ext}"
+            file_path = os.path.join(upload_dir, unique_filename)
+            
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(data_file.file, buffer)
+            
+            source_file_url = os.path.abspath(file_path)
+            logger.info(f"✅ Data source saved: {source_file_url}")
+
         # Validate sheet ownership
-        sheet = validate_sheet_ownership(db, str(sheet_id), current_user.busi_user_id)
+        sheet = None
+        is_file_source = (sheet_id in ["none", "file", "null", "undefined", ""]) or data_file is not None or (request.source_file_url is not None)
+        
+        if not is_file_source:
+            try:
+                sheet = validate_sheet_ownership(db, str(sheet_id), current_user.busi_user_id)
+            except HTTPException as e:
+                # If sheet not found but it looks like a file source could be intended, fallback
+                if data_file or request.source_file_url:
+                    is_file_source = True
+                    logger.info(f"Fallback to file source for sheet_id: {sheet_id}")
+                else:
+                    raise e
         
         # Determine device ID if present
         dev_id_str = str(request.device_id) if request.device_id else None
@@ -1460,6 +1625,7 @@ async def create_trigger(
         new_trigger = GoogleSheetTrigger(
             trigger_id=str(uuid.uuid4()),
             sheet_id=sheet.id if sheet else None,
+            user_id=str(current_user.busi_user_id),
             device_id=dev_id_str,
             trigger_type=request.trigger_type,
             message_template=request.message_template,
@@ -1472,7 +1638,8 @@ async def create_trigger(
             send_time_column=request.send_time_column,
             message_column=request.message_column,
             scheduled_at=request.scheduled_at,
-            source_file_url=request.source_file_url,
+            source_type="file" if is_file_source else "google_sheet",
+            source_file_url=source_file_url,
             media_url=media_url,
             media_type=media_type,
             trigger_config={
@@ -1494,7 +1661,7 @@ async def create_trigger(
             task = asyncio.create_task(_trigger_worker_task(t_id))
             active_trigger_tasks[t_id] = task
             
-        logger.info(f"✅ Created and started trigger {new_trigger.trigger_id} for sheet {sheet.id}")
+        logger.info(f"✅ Created and started trigger {new_trigger.trigger_id} for {'File' if is_file_source else 'Sheet ' + str(sheet.id)}")
         
         # Lookup device name
         device = db.query(Device).filter(Device.device_id == dev_id_str).first() if dev_id_str else None
@@ -1513,7 +1680,7 @@ async def create_trigger(
             last_triggered_at=new_trigger.last_triggered_at,
             created_at=new_trigger.created_at,
             device_name=device.device_name if device else "Official API",
-            sheet_name=sheet.sheet_name
+            sheet_name=sheet.sheet_name if sheet else (f"File: {os.path.basename(source_file_url or '')[:20]}" if source_file_url else "Standalone")
         )
         
     except HTTPException:
@@ -1731,8 +1898,8 @@ async def get_polling_status(
 ):
     """Check if any triggers are currently running for this user"""
     # Find all triggers for this user
-    user_triggers = db.query(GoogleSheetTrigger.trigger_id).join(GoogleSheet).filter(
-        GoogleSheet.user_id == str(current_user.busi_user_id)
+    user_triggers = db.query(GoogleSheetTrigger.trigger_id).filter(
+        GoogleSheetTrigger.user_id == str(current_user.busi_user_id)
     ).all()
     
     user_trigger_ids = [str(t[0]) for t in user_triggers]
@@ -1758,9 +1925,9 @@ async def start_polling(
     """🚀 MANUALLY START all enabled triggers for this user"""
     try:
         # Find all enabled triggers for this user's sheets
-        triggers = db.query(GoogleSheetTrigger).join(GoogleSheet).filter(
+        triggers = db.query(GoogleSheetTrigger).filter(
             and_(
-                GoogleSheet.user_id == str(current_user.busi_user_id),
+                GoogleSheetTrigger.user_id == str(current_user.busi_user_id),
                 GoogleSheetTrigger.is_enabled == True
             )
         ).all()
@@ -1792,8 +1959,8 @@ async def stop_polling(
     """🛑 MANUALLY STOP all running triggers for this user"""
     try:
         # Find all triggers for this user's sheets
-        triggers = db.query(GoogleSheetTrigger).join(GoogleSheet).filter(
-            GoogleSheet.user_id == str(current_user.busi_user_id)
+        triggers = db.query(GoogleSheetTrigger).filter(
+            GoogleSheetTrigger.user_id == str(current_user.busi_user_id)
         ).all()
         
         stopped_count = 0
@@ -1824,9 +1991,9 @@ async def fire_triggers_now(
     try:
         from sqlalchemy import and_
         # Find all enabled triggers for this user's sheets
-        triggers = db.query(GoogleSheetTrigger).join(GoogleSheet).filter(
+        triggers = db.query(GoogleSheetTrigger).filter(
             and_(
-                GoogleSheet.user_id == str(current_user.busi_user_id),
+                GoogleSheetTrigger.user_id == str(current_user.busi_user_id),
                 GoogleSheetTrigger.is_enabled == True
             )
         ).all()
@@ -1943,21 +2110,43 @@ async def _execute_trigger_process(t_id: str, session: Session, is_manual: bool 
         return False
         
     sheet = session.query(GoogleSheet).filter(GoogleSheet.id == current_trigger.sheet_id).first()
-    if not sheet:
-        logger.error(f"❌ [PROCESS_{t_id}] Sheet missing for trigger {t_id}.")
+    
+    # 🔥 SELF-HEALING SOURCE DETECTION
+    # If sheet is missing but there is a file URL, automatically fix source_type
+    if not sheet and current_trigger.source_type == "google_sheet" and current_trigger.source_file_url:
+        logger.warning(f"🩹 [PROCESS_{t_id}] Sheet missing but file found. Auto-correcting source_type to 'file'.")
+        current_trigger.source_type = "file"
+        session.commit()
+
+    if not sheet and current_trigger.source_type == "google_sheet":
+        logger.error(f"❌ [PROCESS_{t_id}] Sheet missing for Google Sheet trigger {t_id}.")
         return False
+    
+    # Prefix for logging
+    source_info = sheet.spreadsheet_id if sheet else (os.path.basename(current_trigger.source_file_url or "Unknown File"))
         
     automation_service = GoogleSheetsAutomationServiceUnofficial(session)
     
     prefix = "🔥 [MANUAL_FIRE]" if is_manual else "🔄 [POLLING]"
-    logger.info(f"{prefix} [{t_id}] Checking sheet {sheet.spreadsheet_id}...")
+    logger.info(f"{prefix} [{t_id}] Checking source {source_info}...")
     
     try:
-        rows_data, headers_data = await asyncio.to_thread(
-            automation_service.sheets_service.get_sheet_data_with_headers,
-            spreadsheet_id=sheet.spreadsheet_id,
-            worksheet_name=sheet.worksheet_name
-        )
+        if current_trigger.source_type == "google_sheet" and sheet:
+            rows_data, headers_data = await asyncio.to_thread(
+                automation_service.sheets_service.get_sheet_data_with_headers,
+                spreadsheet_id=sheet.spreadsheet_id,
+                worksheet_name=sheet.worksheet_name
+            )
+        elif current_trigger.source_type == "file" and current_trigger.source_file_url:
+            rows_data, headers_data = automation_service._load_local_file_data(current_trigger.source_file_url)
+            if not rows_data and not headers_data:
+                logger.warning(f"⚠️ [PROCESS_{t_id}] File missing or empty. Auto-pausing trigger.")
+                current_trigger.is_enabled = False
+                session.commit()
+                return False
+        else:
+            logger.error(f"❌ [PROCESS_{t_id}] Missing data source configuration (Sheet or File)")
+            return False
         
         if rows_data:
             logger.info(f"📊 [{t_id}] Found {len(rows_data)} rows. Processing triggers...")
