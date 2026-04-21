@@ -104,8 +104,8 @@ async def keep_engine_alive():
 
 async def auto_migrate_db():
     """🚀 [AUTO-HEALER] Smartly adds missing columns only if they don't exist."""
-    # Wait for the server to be fully ready
-    await asyncio.sleep(5)
+    # Wait for the server to be fully ready (reduced from 5s to 2s for faster startup)
+    await asyncio.sleep(2)
     db_logger.info("🛠️ [AUTO-MIGRATE] Checking database synchronization...")
     
     migrations = [
@@ -133,7 +133,7 @@ async def auto_migrate_db():
                         db_logger.info(f"   ➕ Adding missing {c} to {t}...")
                         # Run the migration in its own transaction
                         with engine.begin() as trans_conn:
-                            trans_conn.execute(text("SET statement_timeout = '10s';")) # Avoid infinite hang
+                            trans_conn.execute(text("SET statement_timeout = '5s';")) # Reduced from 10s to 5s
                             trans_conn.execute(text(s))
                         db_logger.info(f"   ✅ Added {c} to {t}")
             await run_in_threadpool(check_and_run, table, col, sql)
@@ -146,7 +146,7 @@ async def auto_migrate_db():
     try:
         def fix_nullable():
             with engine.begin() as conn:
-                conn.execute(text("SET statement_timeout = '10s';"))
+                conn.execute(text("SET statement_timeout = '5s';")) # Reduced from 10s to 5s
                 conn.execute(text("ALTER TABLE google_sheet_triggers ALTER COLUMN sheet_id DROP NOT NULL;"))
                 conn.execute(text("ALTER TABLE sheet_trigger_history ALTER COLUMN sheet_id DROP NOT NULL;"))
         await run_in_threadpool(fix_nullable)
@@ -156,7 +156,7 @@ async def auto_migrate_db():
     try:
         def backfill():
             with engine.begin() as conn:
-                conn.execute(text("SET statement_timeout = '10s';"))
+                conn.execute(text("SET statement_timeout = '5s';")) # Reduced from 10s to 5s
                 conn.execute(text("UPDATE google_sheet_triggers t SET user_id = s.user_id FROM google_sheets s WHERE t.sheet_id = s.id AND t.user_id IS NULL;"))
         await run_in_threadpool(backfill)
     except Exception: pass
@@ -199,28 +199,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ [CAMPAIGNS] Failed to schedule tasks: {e}")
     
-    # 🔥 [RESUMED] Auto-start restored to prevent stranded triggers.
-    # 🔥 [RESUMED] Auto-start restored to prevent stranded triggers.
-    async def deferred_trigger_start():
-        logger.info("⏳ [STARTUP] Trigger resumption task waiting for 45s...")
-        await asyncio.sleep(45) # Give more time for DB/Engine/Migrations to stabilize
-        try:
-            logger.info("🚀 [RESUME] Starting enabled Google Sheets triggers...")
-            from api.google_sheets import start_all_enabled_triggers_on_boot
-            
-            # 🔥 FIXED: Add global timeout wrapper to prevent any hanging
-            try:
-                # Run with overall timeout to prevent indefinite hanging
-                count = await asyncio.wait_for(start_all_enabled_triggers_on_boot(), timeout=45.0)
-                logger.info(f"✅ [RESUME] Successfully resumed {count} trigger tasks.")
-            except asyncio.TimeoutError:
-                logger.error("❌ [RESUME] Trigger resumption TIMED OUT after 45 seconds - skipping triggers")
-            except Exception as e:
-                logger.error(f"❌ [RESUME] Trigger resumption failed: {e} - skipping triggers")
-        except Exception as e:
-            logger.error(f"❌ [RESUME] CRITICAL: Failed to import or start triggers: {e}")
-    # 🔥 FIXED: Don't even create the task if it's causing hanging - make it truly optional
-    # asyncio.create_task(deferred_trigger_start())
+    # 🔥 [DISABLED] Trigger auto-start removed to prevent startup hanging in production
+    # Triggers can be manually started via API endpoints if needed
     
     # 🔥 [KEEP-ALIVE] Engine background task disabled as requested
     # logger.info("💓 [KEEP-ALIVE] Starting engine background task...")
