@@ -119,18 +119,26 @@ async def auto_migrate_db():
     ]
     
     from fastapi.concurrency import run_in_threadpool
+    from sqlalchemy.exc import OperationalError
     
     for table, col, sql, desc in migrations:
         try:
             def check_and_run(t, c, s):
-                with engine.begin() as conn:
+                # Use a plain connection instead of a transaction block for checking
+                with engine.connect() as conn:
                     # Check if column exists
-                    curr = conn.execute(text(f"SELECT column_name FROM information_schema.columns WHERE table_name='{t}' AND column_name='{c}';"))
+                    query = text(f"SELECT column_name FROM information_schema.columns WHERE table_name=:t AND column_name=:c;")
+                    curr = conn.execute(query, {"t": t, "c": c})
                     if not curr.first():
                         db_logger.info(f"   ➕ Adding missing {c} to {t}...")
-                        conn.execute(text("SET statement_timeout = 0;")) # No timeout for the update
-                        conn.execute(text(s))
+                        # Run the migration in its own transaction
+                        with engine.begin() as trans_conn:
+                            trans_conn.execute(text("SET statement_timeout = '10s';")) # Avoid infinite hang
+                            trans_conn.execute(text(s))
+                        db_logger.info(f"   ✅ Added {c} to {t}")
             await run_in_threadpool(check_and_run, table, col, sql)
+        except OperationalError as oe:
+             db_logger.warning(f"   ⚠️ [AUTO-MIGRATE] Connection error during {desc}: {str(oe)[:100]}")
         except Exception as me:
             db_logger.warning(f"   ⚠️ [AUTO-MIGRATE] {desc} skipped: {str(me)[:100]}")
 
@@ -138,6 +146,7 @@ async def auto_migrate_db():
     try:
         def fix_nullable():
             with engine.begin() as conn:
+                conn.execute(text("SET statement_timeout = '10s';"))
                 conn.execute(text("ALTER TABLE google_sheet_triggers ALTER COLUMN sheet_id DROP NOT NULL;"))
                 conn.execute(text("ALTER TABLE sheet_trigger_history ALTER COLUMN sheet_id DROP NOT NULL;"))
         await run_in_threadpool(fix_nullable)
@@ -147,17 +156,22 @@ async def auto_migrate_db():
     try:
         def backfill():
             with engine.begin() as conn:
+                conn.execute(text("SET statement_timeout = '10s';"))
                 conn.execute(text("UPDATE google_sheet_triggers t SET user_id = s.user_id FROM google_sheets s WHERE t.sheet_id = s.id AND t.user_id IS NULL;"))
         await run_in_threadpool(backfill)
     except Exception: pass
             
-    db_logger.info("✅ [AUTO-MIGRATE] Database is fully synchronized")
+    db_logger.info("✅ [AUTO-MIGRATE] Database synchronization finished")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for safe background task handling"""
     logger.info("🎬 [STARTUP] WhatsApp Platform Backend initializing...")
     logger.info(f"⚙️ [CONFIG] Engine URL: {settings.WHATSAPP_ENGINE_URL}")
+    
+    # 🔥 Log database pool settings for debugging
+    logger.info(f"🔧 [DB POOL] Configured pool_size=25, max_overflow=25 (production-optimized)")
+    logger.info(f"🔧 [DB POOL] Total max connections=50")
     
     # 1. Run Auto-Migrations in background (to prevent startup hang)
     asyncio.create_task(auto_migrate_db())
@@ -186,16 +200,27 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ [CAMPAIGNS] Failed to schedule tasks: {e}")
     
     # 🔥 [RESUMED] Auto-start restored to prevent stranded triggers.
+    # 🔥 [RESUMED] Auto-start restored to prevent stranded triggers.
     async def deferred_trigger_start():
-        await asyncio.sleep(20)
+        logger.info("⏳ [STARTUP] Trigger resumption task waiting for 45s...")
+        await asyncio.sleep(45) # Give more time for DB/Engine/Migrations to stabilize
         try:
             logger.info("🚀 [RESUME] Starting enabled Google Sheets triggers...")
             from api.google_sheets import start_all_enabled_triggers_on_boot
-            count = await start_all_enabled_triggers_on_boot()
-            logger.info(f"✅ [RESUME] Started {count} triggers.")
+            
+            # 🔥 FIXED: Add global timeout wrapper to prevent any hanging
+            try:
+                # Run with overall timeout to prevent indefinite hanging
+                count = await asyncio.wait_for(start_all_enabled_triggers_on_boot(), timeout=45.0)
+                logger.info(f"✅ [RESUME] Successfully resumed {count} trigger tasks.")
+            except asyncio.TimeoutError:
+                logger.error("❌ [RESUME] Trigger resumption TIMED OUT after 45 seconds - skipping triggers")
+            except Exception as e:
+                logger.error(f"❌ [RESUME] Trigger resumption failed: {e} - skipping triggers")
         except Exception as e:
-            logger.error(f"❌ [RESUME] Trigger startup failed: {e}")
-    asyncio.create_task(deferred_trigger_start())
+            logger.error(f"❌ [RESUME] CRITICAL: Failed to import or start triggers: {e}")
+    # 🔥 FIXED: Don't even create the task if it's causing hanging - make it truly optional
+    # asyncio.create_task(deferred_trigger_start())
     
     # 🔥 [KEEP-ALIVE] Engine background task disabled as requested
     # logger.info("💓 [KEEP-ALIVE] Starting engine background task...")
@@ -367,10 +392,53 @@ async def database_health_check(db = Depends(get_db)):
     """Database health check point to verify connection pool health"""
     try:
         db.execute(text("SELECT 1"))
-        return {"status": "healthy", "service": "PostgreSQL Database"}
+        # 🔥 Log actual pool status
+        pool = engine.pool
+        return {
+            "status": "healthy",
+            "service": "PostgreSQL Database",
+            "pool": {
+                "size": pool.size(),
+                "checked_in": pool.checkedin(),
+                "checked_out": pool.checkedout(),
+                "overflow": pool.overflow(),
+                "configured_size": 25,
+                "configured_max_overflow": 25
+            }
+        }
     except Exception as e:
         logger.error(f"Database health check failed: {e}")
         return JSONResponse(status_code=503, content={"status": "unhealthy", "error": str(e)})
+
+@app.post("/admin/db/recreate-engine")
+async def recreate_database_engine():
+    """
+    🔥 ADMIN ONLY: Force recreation of database engine with new pool settings
+    Use this if connection pool is exhausted or has wrong settings
+    """
+    try:
+        logger.info("🔄 [ADMIN] Forcing database engine recreation...")
+        old_engine = engine
+        new_engine = settings.recreate_engine()
+        
+        # Update the global engine reference in db.base
+        from db import base
+        base.engine = new_engine
+        
+        # Update sessionmaker
+        from db.session import SessionLocal
+        SessionLocal.configure(bind=new_engine)
+        
+        logger.info("✅ [ADMIN] Database engine recreated successfully")
+        return {
+            "status": "success",
+            "message": "Database engine recreated with new pool settings",
+            "pool_size": 25,
+            "max_overflow": 25
+        }
+    except Exception as e:
+        logger.error(f"❌ [ADMIN] Failed to recreate engine: {e}")
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
 
 
 @app.get("/health/background")

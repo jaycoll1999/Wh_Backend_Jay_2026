@@ -12,6 +12,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=
 def get_db():
     """
     FastAPI dependency that provides a fresh session per request with a retry mechanism.
+    The session is automatically closed by FastAPI after the request completes.
     """
     max_retries = 3
     retry_count = 0
@@ -19,13 +20,14 @@ def get_db():
     while retry_count < max_retries:
         db = SessionLocal()
         try:
-            # 🔥 Test the connection before yielding (ensures pool pre-ping works)
-            db.execute(text("SELECT 1"))
+            # 🔥 FIXED: Remove connection test to prevent hanging
+            # The connection pool will handle connection errors gracefully
             yield db
+            # On success path, FastAPI will close the session automatically
             return # Success, break the loop
         except OperationalError as e:
             retry_count += 1
-            logger.warning(f"⚠️ [RETRY {retry_count}/{max_retries}] Database connection failed: {e}")
+            logger.warning(f" [RETRY {retry_count}/{max_retries}] Database connection failed: {e}")
             if db.in_transaction():
                 db.rollback()
             db.close()
@@ -35,11 +37,14 @@ def get_db():
                 raise e
             import time
             time.sleep(1) # Wait before retry
+        except TimeoutError as e:
+            logger.error(f"❌ Database connection timeout: {e}")
+            if db.in_transaction():
+                db.rollback()
+            db.close()
+            raise e
         except Exception as e:
             if db.in_transaction():
                 db.rollback()
             db.close()
             raise e
-        finally:
-            if 'db' in locals():
-                db.close()

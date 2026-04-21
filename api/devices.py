@@ -99,9 +99,12 @@ async def get_connected_unofficial_device(
             raise HTTPException(status_code=401, detail="Invalid token")
 
         # 🔥 FORCE SYNC: Ensure we have the latest status from engine before returning connected devices
+        # Use fresh session to avoid holding the request's connection open during HTTP calls
         try:
             from services.device_sync_service import device_sync_service
-            device_sync_service.sync_user_devices(device_service.db, user_id)
+            from db.session import SessionLocal
+            with SessionLocal() as sync_db:
+                device_sync_service.sync_user_devices(sync_db, user_id)
             logger.info(f"🔄 Synced devices for user {user_id} before returning connected list")
         except Exception as sync_err:
             logger.warning(f"⚠️ Auto-sync failed for user {user_id}: {sync_err}")
@@ -368,7 +371,9 @@ async def get_unofficial_devices(
         if sync:
             try:
                 logger.info(f"🔄 Auto-syncing devices for user {user_id} before listing...")
-                device_sync_service.sync_user_devices(device_service.db, user_id)
+                from db.session import SessionLocal
+                with SessionLocal() as sync_db:
+                    device_sync_service.sync_user_devices(sync_db, user_id)
             except Exception as sync_err:
                 logger.warning(f"⚠️ Auto-sync failed for user {user_id}: {sync_err}")
                 # Continue anyway, show what we have in DB
@@ -429,3 +434,50 @@ async def heal_orphaned_devices(
     except Exception as e:
         logger.error(f"❌ Heal failed: {e}")
         raise HTTPException(status_code=500, detail=f"Heal process failed: {str(e)}")
+
+@router.post("/monitor/start")
+async def start_device_monitoring():
+    """
+    🔥 NEW: Start continuous device monitoring service
+    """
+    try:
+        from services.device_monitor_service import start_device_monitoring
+        start_device_monitoring()
+        logger.info("🚀 Device monitoring service started via API")
+        return {
+            "success": True,
+            "message": "Device monitoring service started successfully"
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to start monitoring: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start monitoring: {str(e)}")
+
+@router.post("/monitor/stop")
+async def stop_device_monitoring():
+    """
+    🔥 NEW: Stop continuous device monitoring service
+    """
+    try:
+        from services.device_monitor_service import stop_device_monitoring
+        stop_device_monitoring()
+        logger.info("🛑 Device monitoring service stopped via API")
+        return {
+            "success": True,
+            "message": "Device monitoring service stopped successfully"
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to stop monitoring: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to stop monitoring: {str(e)}")
+
+@router.post("/monitor/force-sync")
+async def force_sync_all_devices():
+    """
+    🔥 NEW: Force immediate sync of all devices
+    """
+    try:
+        from services.device_monitor_service import device_monitor_service
+        result = device_monitor_service.force_sync_all_devices()
+        return result
+    except Exception as e:
+        logger.error(f"❌ Force sync failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Force sync failed: {str(e)}")

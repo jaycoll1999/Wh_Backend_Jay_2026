@@ -240,7 +240,7 @@ async def whatsapp_baileys_webhook(
         event_type = payload.get("event")
         
         if event_type == "messages.upsert":
-            result = await baileys_sync_service.handle_message_upsert(device_id, payload)
+            result = await baileys_sync_service.handle_message_upsert(device_id, payload, db)
             logger.info(f"[BAILEYS] Processed messages.upsert for device {device_id}: {result}")
             return result
             
@@ -250,7 +250,7 @@ async def whatsapp_baileys_webhook(
             return {"status": "success", "event": "chats.set"}
             
         elif event_type == "messages.set":
-            await baileys_sync_service.handle_messages_set(device_id, payload)
+            await baileys_sync_service.handle_messages_set(device_id, payload, db)
             logger.info(f"[BAILEYS] Processed messages.set for device {device_id}")
             return {"status": "success", "event": "messages.set"}
             
@@ -320,7 +320,7 @@ async def connection_update(
             # Best-effort: backfill unread/history from engine ONCE when transitioning to connected.
             # Also start new Baileys message synchronization
             if not was_connected:
-                def _run_backfill_and_sync(dev_id: str):
+                async def _run_backfill_and_sync(dev_id: str):
                     _db = SessionLocal()
                     try:
                         # Legacy backfill for existing system
@@ -330,9 +330,8 @@ async def connection_update(
                         else:
                             logger.info(f"[BACKFILL] completed for device={dev_id}: {result}")
                         
-                        # Start new Baileys message synchronization
-                        import asyncio
-                        asyncio.run(message_sync_initiator.start_sync_on_connection(dev_id, _db))
+                        # Start new Baileys message synchronization - use await instead of asyncio.run()
+                        await message_sync_initiator.start_sync_on_connection(dev_id, _db)
                         
                     except Exception as e:
                         logger.error(f"[BACKFILL/SYNC] error for device={dev_id}: {e}")

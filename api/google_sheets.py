@@ -14,6 +14,7 @@ import re
 import asyncio
 
 logger = logging.getLogger(__name__)
+db_logger = logging.getLogger("GOOGLE_SHEETS")
 router = APIRouter()
 active_trigger_tasks = {}
 
@@ -1509,6 +1510,27 @@ async def create_standalone_trigger(
         if t_id not in active_trigger_tasks or active_trigger_tasks[t_id].done():
             task = asyncio.create_task(_trigger_worker_task(t_id))
             active_trigger_tasks[t_id] = task
+        
+        # 🔥 IMMEDIATE FIRE FOR TIME TRIGGERS
+        # If this is a time trigger with a scheduled time that has already passed, fire it immediately
+        if new_trigger.trigger_type == "time" and new_trigger.scheduled_at:
+            from datetime import datetime, timezone, timedelta
+            ist_tz = timezone(timedelta(hours=5, minutes=30))
+            literal_time = new_trigger.scheduled_at.replace(tzinfo=None)
+            sched_time_utc = literal_time.replace(tzinfo=ist_tz).astimezone(timezone.utc)
+            now_utc = datetime.now(timezone.utc)
+            
+            if now_utc >= sched_time_utc:
+                logger.info(f"🔥 [AUTO_FIRE] Trigger {t_id} schedule time has passed. Firing immediately...")
+                # Create a one-off task to fire immediately
+                async def fire_immediately():
+                    from db.session import SessionLocal
+                    session = SessionLocal()
+                    try:
+                        await _execute_trigger_process(t_id, session, is_manual=True)
+                    finally:
+                        session.close()
+                asyncio.create_task(fire_immediately())
             
         device = db.query(Device).filter(Device.device_id == dev_id_str).first() if dev_id_str else None
         
@@ -1660,6 +1682,27 @@ async def create_trigger(
             logger.info(f"🚀 [AUTO-START] Trigger created and started: {t_id}")
             task = asyncio.create_task(_trigger_worker_task(t_id))
             active_trigger_tasks[t_id] = task
+        
+        # 🔥 IMMEDIATE FIRE FOR TIME TRIGGERS
+        # If this is a time trigger with a scheduled time that has already passed, fire it immediately
+        if new_trigger.trigger_type == "time" and new_trigger.scheduled_at:
+            from datetime import datetime, timezone, timedelta
+            ist_tz = timezone(timedelta(hours=5, minutes=30))
+            literal_time = new_trigger.scheduled_at.replace(tzinfo=None)
+            sched_time_utc = literal_time.replace(tzinfo=ist_tz).astimezone(timezone.utc)
+            now_utc = datetime.now(timezone.utc)
+            
+            if now_utc >= sched_time_utc:
+                logger.info(f"🔥 [AUTO_FIRE] Trigger {t_id} schedule time has passed. Firing immediately...")
+                # Create a one-off task to fire immediately
+                async def fire_immediately():
+                    from db.session import SessionLocal
+                    session = SessionLocal()
+                    try:
+                        await _execute_trigger_process(t_id, session, is_manual=True)
+                    finally:
+                        session.close()
+                asyncio.create_task(fire_immediately())
             
         logger.info(f"✅ Created and started trigger {new_trigger.trigger_id} for {'File' if is_file_source else 'Sheet ' + str(sheet.id)}")
         
@@ -2072,25 +2115,46 @@ async def start_all_enabled_triggers_on_boot():
     from db.session import SessionLocal
     import time
     
-    max_retries = 3
+    max_retries = 3  # Increased from 2 to handle slow boots
     for attempt in range(max_retries):
         session = None
         try:
             session = SessionLocal()
-            triggers = session.query(GoogleSheetTrigger).filter(GoogleSheetTrigger.is_enabled == True).all()
+            # Add timeout to database query - reduced timeout to prevent hanging
+            try:
+                triggers = await asyncio.wait_for(
+                    asyncio.to_thread(session.query(GoogleSheetTrigger).filter(GoogleSheetTrigger.is_enabled == True).all),
+                    timeout=30.0  # Reduced from 60s to 30s
+                )
+            except asyncio.TimeoutError:
+                db_logger.error("❌ [AUTO-START] Database query timed out - skipping trigger startup")
+                return 0
             started = 0
+            db_logger.info(f"🔍 [AUTO-START] Found {len(triggers)} enabled triggers to resume.")
+            
             for trigger in triggers:
                 t_id = str(trigger.trigger_id)
                 if t_id not in active_trigger_tasks or active_trigger_tasks[t_id].done():
-                    logger.info(f"🚀 [AUTO-START] Trigger: {t_id}")
+                    logger.info(f"🚀 [AUTO-START] Spawning worker for trigger: {t_id}")
                     task = asyncio.create_task(_trigger_worker_task(t_id))
                     active_trigger_tasks[t_id] = task
                     started += 1
+                else:
+                    db_logger.info(f"⏭️ [AUTO-START] Trigger {t_id} already has an active task.")
+            
+            db_logger.info(f"✅ [AUTO-START] Resumption complete. Spawned {started} workers.")
             return started
+        except asyncio.TimeoutError:
+            logger.error(f"⚠️ [AUTO-START] Attempt {attempt + 1} timed out accessing database")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2) # Reduced wait time
+            else:
+                logger.error("❌ [AUTO-START] All attempts timed out. Skipping trigger startup.")
+                return 0
         except Exception as e:
             logger.error(f"⚠️ [AUTO-START] Attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
-                await asyncio.sleep(5) # Wait 5s before retrying
+                await asyncio.sleep(2) # Reduced wait time
             else:
                 logger.error("❌ [AUTO-START] All attempts to resume triggers failed.")
                 return 0
@@ -2167,7 +2231,7 @@ async def _trigger_worker_task(t_id: str):
     logger.info(f"🆕 [WORKER_{t_id}] Worker task created. Starting loop...")
     
     # ⚡ [PERFORMANCE] Poll every 15 seconds to keep system fast and responsive
-    interval = 15 
+    interval = 15
     is_first_run = True
     
     # 🔥 STAGGERED START: Spreads out multiple triggers to prevent slamming Google API at once
@@ -2187,6 +2251,15 @@ async def _trigger_worker_task(t_id: str):
             current_trigger = session.query(GoogleSheetTrigger).filter(GoogleSheetTrigger.trigger_id == str(t_id)).first()
             if not current_trigger or not current_trigger.is_enabled:
                 logger.info(f"🛑 [WORKER_{t_id}] Trigger disabled or deleted in DB. Exiting worker.")
+                if t_id in active_trigger_tasks and active_trigger_tasks[t_id] == current_task:
+                    del active_trigger_tasks[t_id]
+                break
+
+            # 🔥 FIX: Stop time-based triggers after firing once
+            if current_trigger.trigger_type == "time" and current_trigger.last_triggered_at:
+                logger.info(f"✅ [WORKER_{t_id}] Time-based trigger completed. Disabling and stopping worker.")
+                current_trigger.is_enabled = False
+                session.commit()
                 if t_id in active_trigger_tasks and active_trigger_tasks[t_id] == current_task:
                     del active_trigger_tasks[t_id]
                 break

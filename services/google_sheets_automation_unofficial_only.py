@@ -315,6 +315,30 @@ class GoogleSheetsAutomationServiceUnofficial:
         error_count = 0
         invalid_rows = 0
         total_rows = len(rows_data)
+        
+        # 🔥 CRITICAL FIX: Check for already processed rows to prevent multiple firings
+        processed_rows = set()
+        try:
+            # Get history for this trigger from last 24 hours
+            from datetime import datetime, timedelta
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
+            recent_history = self.db.query(GoogleSheetTriggerHistory).filter(
+                and_(
+                    GoogleSheetTriggerHistory.trigger_id == str(trigger.trigger_id),
+                    GoogleSheetTriggerHistory.triggered_at >= cutoff_time,
+                    GoogleSheetTriggerHistory.status == TriggerHistoryStatus.SENT.value
+                )
+            ).all()
+            
+            # Extract row numbers that were already processed
+            for history in recent_history:
+                row_data = history.row_data or {}
+                if isinstance(row_data, dict) and 'row_number' in row_data:
+                    processed_rows.add(row_data['row_number'])
+            
+            logger.info(f"🔥 [DUPLICATE_CHECK] Found {len(processed_rows)} already processed rows in last 24h")
+        except Exception as e:
+            logger.warning(f"⚠️ [DUPLICATE_CHECK] Failed to check processed rows: {e}")
 
         try:
             # 🔥 2. PUBLIC MODE DETECTION
@@ -400,7 +424,7 @@ class GoogleSheetsAutomationServiceUnofficial:
             for row in rows_data:
                 try:
                     # Process row
-                    res = await self.process_row_for_trigger(sheet, trigger, row, active_device_id, headers=headers_data)
+                    res = await self.process_row_for_trigger(sheet, trigger, row, active_device_id, headers=headers_data, processed_rows=processed_rows)
                     
                     if isinstance(res, dict):
                         if res.get("match"):
@@ -443,7 +467,7 @@ Errors:        {error_count}
             import traceback
             logger.error(traceback.format_exc())
     
-    async def process_row_for_trigger(self, sheet: GoogleSheet, trigger: GoogleSheetTrigger, row_info: Dict[str, Any], device_id: Any = None, headers: Optional[List[str]] = None):
+    async def process_row_for_trigger(self, sheet: GoogleSheet, trigger: GoogleSheetTrigger, row_info: Dict[str, Any], device_id: Any = None, headers: Optional[List[str]] = None, processed_rows: set = None):
         """
         Process a single row for trigger using unofficial WhatsApp API only
         """
@@ -453,6 +477,15 @@ Errors:        {error_count}
             
             row_data = row_info['data']
             row_number = row_info['row_number']
+            
+            # 🔥 CRITICAL FIX: Initialize processed_rows if not passed
+            if processed_rows is None:
+                processed_rows = set()
+                
+            # 🔥 DUPLICATE CHECK: Skip if already processed
+            if row_number in processed_rows:
+                logger.info(f"   Row {row_number}: Already processed in last 24h. Skipping.")
+                return {"processed": False, "reason": "already_processed"}
             
             # 🔥 NEW: Skip Empty Rows (Filter out filler rows at the bottom of sheets)
             phone_val = self.get_case_insensitive_value(row_data, trigger.phone_column or 'Phone')
@@ -691,27 +724,57 @@ Errors:        {error_count}
                         )
                         return {"processed": False, "reason": "invalid_time"}
                 
-                else:
-                    # Status-based trigger
-                    # 🔥 USER REQUESTED EXACT LOGIC:
+                # 🔥 STATUS CHECK LOGIC - Different for time vs status triggers
                     status_col_name = trigger.status_column or 'Status'
                     raw_status = self.get_case_insensitive_value(row_data, status_col_name)
                     
                     normalized_status = str(raw_status or "").strip().lower()
-                    valid_status = ["send", "yes", "true", "1"]
+                    
+                    # For time-based triggers, allow empty/None status values
+                    # Only require status matching for status-based triggers
+                    process_row = False
+                    match_result = "NO"
+                    
+                    if trigger.trigger_type == "time":
+                        # Time triggers: allow empty status or any status that's not already handled
+                        if not normalized_status or normalized_status in ["", "none"]:
+                            # Empty status is OK for time triggers
+                            process_row = True
+                            match_result = "YES (empty OK for time trigger)"
+                        elif normalized_status in ["send", "yes", "true", "1"]:
+                            # Explicit send status is also OK
+                            process_row = True
+                            match_result = "YES"
+                        else:
+                            # Check if it's an already handled status
+                            ALREADY_HANDLED = ['processing', 'success', 'delivered', 'done', 'failed', 'expired', 'sent']
+                            if normalized_status in ALREADY_HANDLED:
+                                process_row = False
+                                match_result = "NO (already handled)"
+                            else:
+                                # Unknown status but not already handled - allow it for time triggers
+                                process_row = True
+                                match_result = "YES (unknown status OK for time trigger)"
+                    else:
+                        # Status-based triggers: require exact match
+                        valid_status = ["send", "yes", "true", "1"]
+                        trigger_value = str(trigger.trigger_value or "").strip().lower()
+                        
+                        # Use trigger_value if set, otherwise use valid_status defaults
+                        if trigger_value:
+                            valid_status = [trigger_value]
+                        
+                        if normalized_status in valid_status:
+                            process_row = True
+                            match_result = "YES"
+                        else:
+                            process_row = False
                     
                     # [ROW DEBUG] Logging
-                    match_result = "NO"
-                    if normalized_status in valid_status:
-                        match_result = "YES"
-                        process_row = True
-                    else:
-                        process_row = False
-                    
                     logger.info(f"\n[ROW DEBUG]\nRow: {row_number}\nRaw Status: \"{raw_status}\"\nCleaned: \"{normalized_status}\"\nMatch: {match_result}")
                     
                     if not process_row:
-                        logger.info(f"   Row {row_number}: ⏭️ Skipped بسبب Status mismatch ('{raw_status}')")
+                        logger.info(f"   Row {row_number}: ⏭️ Skipped due to Status mismatch ('{raw_status}')")
                         return {"processed": False, "match": False, "reason": "status_mismatch"}
                     
                     logger.info(f"   🎯 Row {row_number}: Match found! Status '{raw_status}' matched.")
@@ -748,7 +811,7 @@ Errors:        {error_count}
                     # Use template with processing
                     raw_template = multi_templates[current_t_idx]
                     message = self.sheets_service.process_message_template(raw_template, row_data)
-                    logger.info(f"   📝 [ROUND ROBIN] Using Template {current_t_idx + 1} of {len(multi_templates)}")
+                    logger.info(f"   📝 [ROUND ROBIN] Using Template {current_t_idx + 1} of {len(multi_templates)}: {raw_template[:50]}...")
                 else:
                     # Original logic: prioritize message column over single template
                     message = ""
@@ -945,13 +1008,16 @@ Errors:        {error_count}
                         multi_devices = config.get('multi_device_ids', [])
                         
                         if multi_templates or multi_devices:
+                            # 🔥 CRITICAL FIX: Properly update round-robin indices
                             if multi_templates:
                                 config['current_template_idx'] = (config.get('current_template_idx', 0) + 1) % len(multi_templates)
                             if multi_devices:
                                 config['current_device_idx'] = (config.get('current_device_idx', 0) + 1) % len(multi_devices)
                             
+                            # 🔥 CRITICAL FIX: Commit the config changes to DB
                             trigger.trigger_config = config
-                            # SQLAlchemy session should auto-track this change in trigger_config JSON
+                            self.db.commit()
+                            logger.info(f"   🔄 [ROUND ROBIN] Updated indices - Template: {config.get('current_template_idx', 0)}, Device: {config.get('current_device_idx', 0)}")
                         
                         return {"processed": True, "status": "sent", "match": True}
                         

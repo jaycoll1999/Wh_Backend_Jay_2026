@@ -34,8 +34,6 @@ class Settings(BaseSettings):
     SESSION_MESSAGE_LIMIT: int = 1250
     MIN_DELAY: int = 3
     MAX_DELAY: int = 7
-    DATABASE_POOL_SIZE: int = 10
-    DATABASE_MAX_OVERFLOW: int = 10
     WARM_MIN_DELAY: int = 8
     WARM_MAX_DELAY: int = 15
     MAX_RETRY: int = 3
@@ -58,7 +56,7 @@ class Settings(BaseSettings):
 
     @property
     def WHATSAPP_ENGINE_BASE_URL(self) -> str:
-        # 🔥 ROBUST: Ensure URL is stripped of any hidden newlines or whitespace
+        # ROBUST: Ensure URL is stripped of any hidden newlines or whitespace
         return (self.WHATSAPP_ENGINE_URL or "").strip()
 
     _engine: Optional[Any] = None
@@ -71,7 +69,7 @@ class Settings(BaseSettings):
             
         db_url = self.DATABASE_URL
         
-        # 🔥 ROBUST FIX: Correct legacy 'postgres://' or truncated 'stgresql://' 
+        # 🔥 ROBUST FIX: Correct legacy 'postgres://' or truncated 'stgresql://'
         if db_url and db_url.startswith("postgres://"):
             db_url = db_url.replace("postgres://", "postgresql://", 1)
         elif db_url and db_url.startswith("stgresql://"):
@@ -79,17 +77,37 @@ class Settings(BaseSettings):
             
         self._engine = create_engine(
             db_url,
-            pool_size=2,        # Minimal pool to avoid Render connection limits
-            max_overflow=5,
-            pool_timeout=60,     # Massive wait for high-latency Oregon datacenter
-            pool_recycle=120,    # Recycle faster (2 mins)
-            pool_pre_ping=True, 
+            pool_size=25,  # Production-optimized: not configurable via env
+            max_overflow=25,  # Production-optimized: not configurable via env
+            pool_timeout=60,  # Increased from 30 to 60 seconds for high load scenarios
+            pool_recycle=3600,  # Increased from 1800 to 3600 (1 hour)
+            pool_pre_ping=True,
             connect_args={
-                "connect_timeout": 60, # 60s timeout for flaky SSL handshakes
-                "sslmode": "require"
+                "connect_timeout": 10,  # Reduced from 30 to 10 seconds
+                "sslmode": "require",
+                "application_name": "whatsapp_platform"
             }
         )
+        
+        # Log pool settings for debugging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"🔧 Database engine created with pool_size=25, max_overflow=25")
+        
         return self._engine
+
+    def recreate_engine(self):
+        """Force recreation of database engine with new settings"""
+        if self._engine is not None:
+            try:
+                self._engine.dispose()
+                logger = logging.getLogger(__name__)
+                logger.info("🔄 Disposed old database engine")
+            except Exception as e:
+                logger = logging.getLogger(__name__)
+                logger.warning(f"⚠️ Error disposing engine: {e}")
+        self._engine = None
+        return self.engine
 
 
 
