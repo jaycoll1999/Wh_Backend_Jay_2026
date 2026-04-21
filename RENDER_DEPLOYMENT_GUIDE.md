@@ -4,6 +4,14 @@
 
 This deployment has been optimized for Render's free tier to prevent startup hanging and restart loops.
 
+## Architecture
+
+The system consists of two services:
+1. **Backend** (Python/FastAPI) - API server
+2. **Engine** (Node.js/Express) - WhatsApp session management
+
+Both services must be deployed for the system to work.
+
 ## Key Changes Made
 
 ### 1. render.yaml Configuration
@@ -31,7 +39,39 @@ This deployment has been optimized for Render's free tier to prevent startup han
 
 ## Deployment Steps
 
-### First Time Deployment
+### Step 1: Deploy Engine Service (Required First)
+
+1. **Push code to GitHub** (if not already done)
+2. **Connect to Render**:
+   - Go to [render.com](https://render.com)
+   - Click "New +" → "Web Service"
+   - Connect your GitHub repository
+   - Select `whatsapp-platform-api-engine` directory
+
+3. **Configure Render Service**:
+   - **Name**: whatsapp-platform-api-engine
+   - **Region**: Oregon (or closest to your users)
+   - **Branch**: main
+   - **Runtime**: Node
+   - **Build Command**: `npm install`
+   - **Start Command**: `npm start`
+   - **Instance Type**: Free
+
+4. **Environment Variables** (Optional):
+   ```
+   PORT=10000
+   NODE_ENV=production
+   ```
+
+5. **Advanced Settings**:
+   - **Health Check Path**: `/health`
+   - **Auto-Deploy**: Disable (to prevent restart loops)
+
+6. **Wait for deployment** and verify:
+   - Health check: https://whatsapp-platform-api-engine.onrender.com/health
+   - Should return: `{"status":"ok","engine":"running",...}`
+
+### Step 2: Deploy Backend Service
 
 1. **Push code to GitHub** (if not already done)
 2. **Connect to Render**:
@@ -55,7 +95,7 @@ This deployment has been optimized for Render's free tier to prevent startup han
    SECRET_KEY=your-secret-key-here
    ALGORITHM=HS256
    ACCESS_TOKEN_EXPIRE_MINUTES=30
-   WHATSAPP_ENGINE_URL=https://whatsapp-platform-api-engine.onrender.com/
+   WHATSAPP_ENGINE_URL=https://whatsapp-platform-api-engine.onrender.com
    ```
 
 5. **Advanced Settings**:
@@ -63,6 +103,27 @@ This deployment has been optimized for Render's free tier to prevent startup han
    - **Auto-Deploy**: Disable (to prevent restart loops)
 
 ### Troubleshooting
+
+#### Engine Service Issues
+
+**HTTP 502 Errors from Engine**
+- Verify the Engine service is deployed and running
+- Check Engine health: https://whatsapp-platform-api-engine.onrender.com/health
+- Ensure WHATSAPP_ENGINE_URL in Backend env vars is correct (no trailing slash)
+- Check Engine logs for startup errors or crashes
+
+**Engine Cold Start Delays**
+- The free tier has a 15-minute inactivity timeout
+- Cold starts can take 30-60 seconds
+- The Backend has retry logic (15 attempts) to handle cold starts
+- Consider upgrading to paid tier for always-on service
+
+**Engine Returns HTML Instead of JSON**
+- This is normal during cold starts - Render shows a loading page
+- The Backend automatically retries when this happens
+- Check logs for "RENDER_COLD_START" warnings
+
+#### Backend Service Issues
 
 #### Service Keeps Restarting
 - Check logs for "Detected service running on port 10000"
@@ -98,11 +159,19 @@ POST /api/google-sheets/triggers/start-all
 
 ## Post-Deployment Checklist
 
-- [ ] Service starts successfully
-- [ ] Health check passes
+### Engine Service
+- [ ] Engine service starts successfully
+- [ ] Engine health check passes (/health)
+- [ ] Engine responds to API requests
+- [ ] WhatsApp sessions can be created
+
+### Backend Service
+- [ ] Backend service starts successfully
+- [ ] Backend health check passes (/health)
 - [ ] Database migrations complete
 - [ ] API endpoints respond
-- [ ] WebSocket connections work (if applicable)
+- [ ] Backend can connect to Engine service
+- [ ] Device sync works
 - [ ] Background tasks running (if re-enabled)
 
 ## Notes

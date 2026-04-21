@@ -56,8 +56,10 @@ class Settings(BaseSettings):
 
     @property
     def WHATSAPP_ENGINE_BASE_URL(self) -> str:
-        # ROBUST: Ensure URL is stripped of any hidden newlines or whitespace
-        return (self.WHATSAPP_ENGINE_URL or "").strip()
+        # ROBUST: Ensure URL is stripped of any hidden newlines, whitespace, and trailing slashes
+        url = (self.WHATSAPP_ENGINE_URL or "").strip()
+        # Remove trailing slash to prevent double slashes in URL construction
+        return url.rstrip('/')
 
     _engine: Optional[Any] = None
 
