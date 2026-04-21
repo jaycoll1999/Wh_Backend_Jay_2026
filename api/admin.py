@@ -568,6 +568,7 @@ async def delete_platform_user(
         busi_user = db.query(BusiUser).filter(BusiUser.busi_user_id == str(user_id)).first()
         if busi_user:
             user_name = busi_user.name
+            user_email = busi_user.email
             
             # --- Hierarchical Cleanup for BusiUser ---
             
@@ -618,7 +619,9 @@ async def delete_platform_user(
                 performed_by_id=current_admin.admin_id,
                 performed_by_name=current_admin.name or "Admin",
                 performed_by_role="admin",
+                affected_user_id=user_id,
                 affected_user_name=user_name,
+                affected_user_email=user_email,
                 action_type="DELETE",
                 module="Users",
                 description=f"Admin deleted Business User: {user_name}",
@@ -632,6 +635,7 @@ async def delete_platform_user(
         reseller = db.query(Reseller).filter(Reseller.reseller_id == str(user_id)).first()
         if reseller:
             reseller_name = reseller.name
+            reseller_email = reseller.email
             
             # Resellers might have many managed users. 
             # We promote them to 'admin' (Direct) rather than deleting them.
@@ -649,6 +653,24 @@ async def delete_platform_user(
             db.query(AuditLog).filter(AuditLog.reseller_id == user_id).update({"reseller_id": None}, synchronize_session=False)
             
             db.delete(reseller)
+            
+            # Log this action
+            from services.audit_log_service import AuditLogService
+            from schemas.audit_log import AuditLogCreate
+            audit_service = AuditLogService(db)
+            audit_service.create_log(AuditLogCreate(
+                performed_by_id=current_admin.admin_id,
+                performed_by_name=current_admin.name or "Admin",
+                performed_by_role="admin",
+                affected_user_id=user_id,
+                affected_user_name=reseller_name,
+                affected_user_email=reseller_email,
+                action_type="DELETE",
+                module="Users",
+                description=f"Admin deleted Reseller: {reseller_name}",
+                changes_made=[f"reseller_id: {user_id}"]
+            ))
+            
             db.commit()
             return {"message": f"Reseller {reseller_name} deleted successfully"}
 

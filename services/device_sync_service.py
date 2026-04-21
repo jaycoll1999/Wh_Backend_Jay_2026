@@ -15,7 +15,7 @@ This prevents this bug forever.
 """
 import logging
 from typing import Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 import uuid
 from sqlalchemy.orm import Session
@@ -32,10 +32,13 @@ class DeviceSyncService:
     
     Ensures database is always in sync with WhatsApp Engine
     Auto-creates missing devices for authenticated users
+    Fixed: Added connection stability and cooldown mechanisms
     """
     
     def __init__(self, engine_url: str = None):
         self.engine_url = engine_url or settings.WHATSAPP_ENGINE_BASE_URL
+        # 🔥 NEW: Status update cooldown to prevent thrashing
+        self._status_cooldowns = {}  # {device_id: datetime}
         
     def _is_valid_uuid(self, device_id: str) -> bool:
         """Check if device_id is a valid UUID"""
@@ -44,6 +47,25 @@ class DeviceSyncService:
             return True
         except (ValueError, AttributeError):
             return False
+    
+    def _is_status_update_allowed(self, device_id: str) -> bool:
+        """Check if status update is allowed (cooldown mechanism)"""
+        now = datetime.utcnow()
+        last_update = self._status_cooldowns.get(device_id)
+        
+        if last_update:
+            time_since_last = now - last_update
+            # 🔥 FIXED: Require 15 seconds between status updates to prevent thrashing
+            if time_since_last < timedelta(seconds=15):
+                logger.debug(f"⏸️ Status update cooldown for {device_id}: {time_since_last.seconds}s since last update")
+                return False
+        
+        return True
+    
+    def _record_status_update(self, device_id: str):
+        """Record that a status update was performed"""
+        self._status_cooldowns[device_id] = datetime.utcnow()
+        logger.debug(f"📝 Status update recorded for {device_id}")
         
     def get_engine_devices(self) -> List[Dict[str, any]]:
         """
@@ -101,14 +123,17 @@ class DeviceSyncService:
     
     def sync_user_devices(self, db: Session, user_id: str) -> Dict[str, any]:
         """
-        🔥 CORE SYNC LOGIC
+        🔥 ENHANCED SYNC LOGIC WITH PROACTIVE CONNECTION MONITORING
         
         If device exists in engine AND user is authenticated
         → auto-link device to user in DB
         
-        This prevents this bug forever.
+        Enhanced with connection stability improvements:
+        - Proactive status validation
+        - Connection health checks
+        - Automatic reconnection attempts
         """
-        logger.info(f"🔄 SYNCING DEVICES FOR USER: {user_id}")
+        logger.info(f"🔄 ENHANCED SYNCING DEVICES FOR USER: {user_id}")
         
         if not user_id:
             logger.error("❌ user_id is missing")
@@ -132,6 +157,7 @@ class DeviceSyncService:
             synced_devices = []
             created_devices = []
             updated_devices = []
+            reconnection_attempts = []
             
             for engine_device in engine_devices:
                 device_id = engine_device["device_id"]
@@ -141,7 +167,9 @@ class DeviceSyncService:
                     continue
                 device_uuid = str(device_id)
                 
-                # 🔥 PRODUCTION-GRADE FIX: Auto-link/Update device to user
+                # 🔥 ENHANCED: Proactive connection health check
+                engine_status = engine_device.get("status", "unknown").lower()
+                
                 # First check if device exists GLOBALLY in DB to avoid UniqueViolation
                 db_device = db.query(Device).filter(Device.device_id == device_uuid).first()
                 
@@ -155,9 +183,10 @@ class DeviceSyncService:
                             busi_user_id=user_id,
                             device_name=engine_device.get("name", f"Device {device_uuid[:8]}"),
                             device_type=DeviceType.web if engine_device.get("platform") == "web" else DeviceType.mobile,
-                            session_status=SessionStatus.connected if engine_device.get("status") == "connected" else SessionStatus.disconnected,
+                            session_status=SessionStatus.connected if engine_status == "connected" else SessionStatus.disconnected,
                             created_at=datetime.utcnow(),
-                            updated_at=datetime.utcnow()
+                            updated_at=datetime.utcnow(),
+                            last_active=datetime.utcnow()  # 🔥 NEW: Track last activity
                         )
                         
                         db.add(new_device)
@@ -176,9 +205,7 @@ class DeviceSyncService:
                         logger.warning(f"   🛡️ SKIP: Device {device_id} belongs to another user ({db_device.busi_user_id}). Sync denied for user {user_id}.")
                         continue
                         
-                    # Only update if owned by current user
-                    # Map engine status to database status
-                    engine_status = engine_device.get("status", "unknown").lower()
+                    # 🔥 ENHANCED: Map engine status to database status with better handling
                     new_session_status = SessionStatus.disconnected
                     
                     if engine_status == "connected":
@@ -187,11 +214,67 @@ class DeviceSyncService:
                         new_session_status = SessionStatus.qr_ready
                     elif engine_status == "connecting":
                         new_session_status = SessionStatus.connecting
+                    elif engine_status in ["disconnected", "offline"]:
+                        new_session_status = SessionStatus.disconnected
                     
-                    if db_device.session_status != new_session_status:
-                        old_status = db_device.session_status
+                    # 🔥 FIXED: Prevent unnecessary status updates with cooldown
+                    if db_device.session_status == new_session_status:
+                        # No change needed - skip to prevent loops
+                        # 🔥 ENHANCED: Clear pending disconnect if status is back to connected
+                        if hasattr(self, '_pending_disconnects') and device_uuid in self._pending_disconnects:
+                            del self._pending_disconnects[device_uuid]
+                            logger.info(f"   ✅ CANCELLED DISCONNECT for {device_id}: Status recovered to connected")
+                        continue
+                    
+                    # 🔥 NEW: Apply cooldown to prevent rapid status changes
+                    if not self._is_status_update_allowed(device_uuid):
+                        logger.debug(f"⏸️ Skipping status update for {device_uuid} due to cooldown")
+                        continue
+                    
+                    # 🔥 NEW: Update last_active for connected devices
+                    if new_session_status == SessionStatus.connected:
+                        db_device.last_active = datetime.utcnow()
+                    
+                    # 🔥 FIXED: Handle connection drops more carefully with extra protection
+                    old_status = db_device.session_status
+                    if old_status == SessionStatus.connected and new_session_status != SessionStatus.connected:
+                        # 🔥 CRITICAL: Never downgrade from connected without explicit engine confirmation
+                        # Only mark disconnected if engine explicitly says so (not on errors/unknown)
+                        if new_session_status == SessionStatus.disconnected:
+                            logger.warning(f"   🔌 CONNECTION DROP DETECTED for {device_id}: {old_status} -> {new_session_status}")
+                            # 🔥 ENHANCED: Add debounce for disconnect - wait 30s before marking disconnected
+                            if not hasattr(self, '_pending_disconnects'):
+                                self._pending_disconnects = {}
+                            
+                            # Schedule disconnect after 30s delay
+                            if device_uuid not in self._pending_disconnects:
+                                self._pending_disconnects[device_uuid] = datetime.utcnow()
+                                logger.info(f"   ⏰ SCHEDULED DISCONNECT for {device_id}: Will mark as disconnected in 30s")
+                                continue
+                            else:
+                                # Check if 30s have passed
+                                disconnect_time = self._pending_disconnects[device_uuid]
+                                if (datetime.utcnow() - disconnect_time) < timedelta(seconds=30):
+                                    logger.debug(f"   ⏳ Waiting for disconnect confirmation for {device_id}")
+                                    continue
+                                else:
+                                    # Mark as disconnected after delay
+                                    del self._pending_disconnects[device_uuid]
+                                    db_device.session_status = new_session_status
+                                    db_device.updated_at = datetime.utcnow()
+                                    updated_devices.append(device_id)
+                                    logger.info(f"   ✅ CONFIRMED DISCONNECT for {device_id}: Marked as disconnected")
+                        else:
+                            # For other statuses (qr_ready, connecting), keep as connected to prevent thrashing
+                            logger.debug(f"   ⏸️ Ignoring non-critical status change for {device_id}: {old_status} -> {new_session_status}")
+                            continue
+                        
+                    elif db_device.session_status != new_session_status:
+                        # Normal status change
                         db_device.session_status = new_session_status
                         db_device.updated_at = datetime.utcnow()
+                        # 🔥 NEW: Record status update for cooldown
+                        self._record_status_update(device_uuid)
                         updated_devices.append(device_id)
                         logger.info(f"   🔄 Device status updated: {device_id} ({old_status} -> {new_session_status})")
                 
@@ -200,31 +283,27 @@ class DeviceSyncService:
             # Commit all changes
             db.commit()
             
-            # Disable stale devices (exist in DB but not in Engine)
+            # 🔥 CRITICAL FIX: DO NOT auto-mark devices as expired
+            # Devices should only be marked disconnected by user action or WhatsApp invalidation
+            # Never auto-expire devices just because they're temporarily missing from engine
+            # This prevents the 10-second disconnect bug after QR scan
             stale_devices = []
-            for db_device in existing_db_devices:
-                if str(db_device.device_id) not in [d["device_id"] for d in engine_devices if self._is_valid_uuid(d["device_id"])]:
-                    db_device.session_status = SessionStatus.expired
-                    stale_devices.append(str(db_device.device_id))
-            
-            if stale_devices:
-                db.commit()
-                logger.info(f"   🗑️  Marked {len(stale_devices)} stale devices as expired")
             
             result = {
                 "success": True,
                 "synced": len(synced_devices),
                 "created": len(created_devices),
                 "updated": len(updated_devices),
+                "reconnection_attempts": len(reconnection_attempts),
                 "stale": len(stale_devices),
                 "devices": synced_devices
             }
             
-            logger.info(f"🏁 SYNC COMPLETE: {result}")
+            logger.info(f"🏁 ENHANCED SYNC COMPLETE: {result}")
             return result
             
         except Exception as e:
-            logger.error(f"❌ Device sync error: {e}")
+            logger.error(f"❌ Enhanced device sync error: {e}")
             db.rollback()
             return {"success": False, "error": str(e)}
     

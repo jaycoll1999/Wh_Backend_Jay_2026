@@ -25,6 +25,11 @@ class WhatsAppEngineService:
         self.message_usage_service = MessageUsageService(db) if db else None
         # 🔥 QR Cache: Store QR codes per device to prevent repeated engine calls
         self._qr_cache = {}  # {device_id: {"qr_code": str, "expires_at": datetime, "generated_at": datetime}}
+        # 🔥 NEW: Request cooldowns to prevent rapid polling
+        self._qr_request_cooldowns = {}  # {device_id: datetime}
+        self._status_check_cooldowns = {}  # {device_id: datetime}
+        # 🔥 CRITICAL: Session start locks to prevent duplicate start requests
+        self._session_start_locks = {}  # {device_id: datetime} - tracks active session starts
         self.max_retries = 15  # Increased to 15 (very high to handle slow Render cold starts)
         self.base_timeout = 60 # Increased base timeout
         self.retry_delays = [5, 10, 15, 20, 30, 45, 60, 90, 120, 150, 180, 210, 240, 270, 300]
@@ -222,6 +227,25 @@ class WhatsAppEngineService:
             logger.debug(f"Engine socket check error: {str(e)}")
             return False
     
+    def _is_qr_request_allowed(self, device_id: str) -> bool:
+        """Check if QR request is allowed (cooldown mechanism)"""
+        now = datetime.now(timezone.utc)
+        last_request = self._qr_request_cooldowns.get(device_id)
+        
+        if last_request:
+            time_since_last = now - last_request
+            # 🔥 FIXED: Require 5 seconds between QR requests to prevent spam
+            if time_since_last < timedelta(seconds=5):
+                logger.debug(f"⏸️ QR request cooldown for {device_id}: {time_since_last.seconds}s since last request")
+                return False
+        
+        return True
+    
+    def _record_qr_request(self, device_id: str):
+        """Record that a QR request was performed"""
+        self._qr_request_cooldowns[device_id] = datetime.now(timezone.utc)
+        logger.debug(f"📝 QR request recorded for {device_id}")
+    
     def get_qr_code(self, device_id: str) -> Dict[str, Any]:
         """Get QR code for device with caching to prevent repeated engine calls"""
         logger.info(f"Getting QR code for device {device_id}")
@@ -231,8 +255,13 @@ class WhatsAppEngineService:
         if cached_qr:
             return {"success": True, "data": cached_qr}
         
-        # 🔥 STEP 2: REMOVED COOLDOWN CHECK
-        # We want to force generation if not in cache (or if cache expired)
+        # 🔥 STEP 2: NEW - Apply cooldown to prevent rapid QR requests
+        if not self._is_qr_request_allowed(device_id):
+            return {
+                "success": False,
+                "error": "QR_REQUEST_COOLDOWN",
+                "message": "Please wait a few seconds before requesting QR code again"
+            }
         
         # 🔥 STEP 3: Generate new QR (only when cache is empty and no cooldown)
         response = self._make_request_with_retry("GET", f"/session/{device_id}/qr", timeout=10)
@@ -257,10 +286,12 @@ class WhatsAppEngineService:
                     qr_code = qr_data.get('qr_code') or qr_data.get('qr')
                     
                     if qr_code:
-                        # 🔥 Cache the QR for 45 seconds
+                        # Cache the QR for 45 seconds
                         self._cache_qr(device_id, qr_code, expires_in_seconds=45)
-                        # 🔥 Record successful QR generation
+                        # Record successful QR generation
                         session_validation_service.record_qr_generation(device_id)
+                        # Record QR request for cooldown
+                        self._record_qr_request(device_id)
                         
                         return {
                             "success": True, 
@@ -518,28 +549,63 @@ class WhatsAppEngineService:
         return {"success": False, "error": error_msg}
     
     def start_session(self, device_id: str) -> Dict[str, Any]:
-        """Manually start/initialize a session"""
+        """Manually start/initialize a session with health check and duplicate prevention"""
         logger.info(f"Attempting to start session for device {device_id}")
         
-        response = self._make_request_with_retry("POST", f"/session/{device_id}/start")
+        # CRITICAL: Check for duplicate start request (lock mechanism)
+        now = datetime.now(timezone.utc)
+        if device_id in self._session_start_locks:
+            last_start = self._session_start_locks[device_id]
+            time_since_last = now - last_start
+            # If another start was requested within 30 seconds, ignore it
+            if time_since_last < timedelta(seconds=30):
+                logger.warning(f"Duplicate start request blocked for {device_id} (last start {time_since_last.seconds}s ago)")
+                return {"success": False, "error": "SESSION_START_IN_PROGRESS", "message": "Session start already in progress, please wait"}
         
-        if response is not None and response.status_code == 200:
-            try:
-                result = response.json()
-                logger.info(f"Session start initiated for device {device_id}: {result}")
-                return {"success": True, "result": result}
-            except Exception as e:
-                logger.error(f"Failed to parse start session response: {str(e)}")
-                return {"success": False, "error": f"Invalid response: {str(e)}"}
+        # STEP 1: Check engine health before attempting start
+        engine_health = self.check_engine_health()
+        if not engine_health["healthy"]:
+            error_msg = f"Engine unhealthy, cannot start session: {engine_health.get('error', 'Unknown error')}"
+            logger.error(error_msg)
+            # CRITICAL: Do NOT mark device as disconnected if engine is unreachable
+            # This prevents false disconnects during engine restarts
+            return {"success": False, "error": "ENGINE_UNHEALTHY", "message": error_msg}
         
-        error_msg = f"Failed to start session" + (f": HTTP {response.status_code}" if response else ": No response")
-        logger.error(error_msg)
-        return {"success": False, "error": error_msg}
+        # STEP 2: Set lock to prevent duplicate starts
+        self._session_start_locks[device_id] = now
+        logger.info(f"Session start lock acquired for {device_id}")
+        
+        try:
+            # STEP 3: Attempt session start with retry
+            response = self._make_request_with_retry("POST", f"/session/{device_id}/start")
+            
+            if response is not None and response.status_code == 200:
+                try:
+                    result = response.json()
+                    logger.info(f"Session start initiated for device {device_id}: {result}")
+                    return {"success": True, "result": result}
+                except Exception as e:
+                    logger.error(f"Failed to parse start session response: {str(e)}")
+                    return {"success": False, "error": f"Invalid response: {str(e)}"}
+            
+            error_msg = f"Failed to start session" + (f": HTTP {response.status_code}" if response else ": No response")
+            logger.error(error_msg)
+            return {"success": False, "error": error_msg}
+        finally:
+            # STEP 4: Release lock after 30 seconds (allow retry if failed)
+            def release_lock():
+                if device_id in self._session_start_locks:
+                    del self._session_start_locks[device_id]
+                    logger.info(f"Session start lock released for {device_id}")
+            
+            import threading
+            timer = threading.Timer(30.0, release_lock)
+            timer.start()
     
     def _mark_device_offline(self, device_id: str, reason: str):
         """Mark device as offline in database with reason"""
         try:
-            # ✅ Convert string UUID to UUID object before query
+            # Convert string UUID to UUID object before query
             device_uuid = UUIDService.safe_convert(device_id)
             device = self.db.query(Device).filter(Device.device_id == device_uuid).first()
             if device:
@@ -908,7 +974,7 @@ class WhatsAppEngineService:
             # 🔥 SYNC: Engine says session is missing, update DB
             if device:
                 logger.warning(f"🔄 Syncing status for {device_id}: Engine says 404, marking as disconnected in DB")
-                device.session_status = SessionStatus.DISCONNECTED
+                device.session_status = SessionStatus.disconnected
                 device.last_connected_at = None
                 self.db.commit()
             return {

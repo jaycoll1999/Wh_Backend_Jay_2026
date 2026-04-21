@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import json
-import requests
+import aiohttp
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from sqlalchemy.orm import Session
@@ -90,7 +90,11 @@ class BaileysMessageSyncService:
                         total_messages += len(messages)
                         
                         # Store messages in database
-                        await self._store_messages_batch(device_id, messages)
+                        # Note: This method is only called during initial sync which requires a db session
+                        if self.db is None:
+                            logger.warning("_perform_initial_sync called without db session, skipping message storage")
+                        else:
+                            await self._store_messages_batch(device_id, messages, self.db)
             
             logger.info(f"Initial sync completed for device {device_id}: {total_messages} messages")
             return {
@@ -106,17 +110,17 @@ class BaileysMessageSyncService:
     async def _fetch_chats(self, device_id: str) -> Dict[str, Any]:
         """Fetch all chats using Baileys chats.set event"""
         try:
-            response = requests.get(
-                f"{self.engine_url}/session/{device_id}/chats",
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                chats_data = response.json()
-                return {"success": True, "chats": chats_data.get("chats", [])}
-            else:
-                logger.error(f"Failed to fetch chats: HTTP {response.status_code}")
-                return {"success": False, "error": f"HTTP {response.status_code}"}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.engine_url}/session/{device_id}/chats",
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status == 200:
+                        chats_data = await response.json()
+                        return {"success": True, "chats": chats_data.get("chats", [])}
+                    else:
+                        logger.error(f"Failed to fetch chats: HTTP {response.status}")
+                        return {"success": False, "error": f"HTTP {response.status}"}
                 
         except Exception as e:
             logger.error(f"Error fetching chats for device {device_id}: {e}")
@@ -125,23 +129,23 @@ class BaileysMessageSyncService:
     async def _fetch_chat_messages(self, device_id: str, chat_jid: str, limit: int = 100) -> Dict[str, Any]:
         """Fetch messages for a specific chat using Baileys messages.set event"""
         try:
-            response = requests.get(
-                f"{self.engine_url}/session/{device_id}/messages/{chat_jid}?limit={limit}",
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                messages_data = response.json()
-                return {"success": True, "messages": messages_data.get("messages", [])}
-            else:
-                logger.error(f"Failed to fetch messages for {chat_jid}: HTTP {response.status_code}")
-                return {"success": False, "error": f"HTTP {response.status_code}"}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.engine_url}/session/{device_id}/messages/{chat_jid}?limit={limit}",
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status == 200:
+                        messages_data = await response.json()
+                        return {"success": True, "messages": messages_data.get("messages", [])}
+                    else:
+                        logger.error(f"Failed to fetch messages for {chat_jid}: HTTP {response.status}")
+                        return {"success": False, "error": f"HTTP {response.status}"}
                 
         except Exception as e:
             logger.error(f"Error fetching messages for {chat_jid}: {e}")
             return {"success": False, "error": str(e)}
     
-    async def _store_messages_batch(self, device_id: str, messages: List[Dict[str, Any]]) -> int:
+    async def _store_messages_batch(self, device_id: str, messages: List[Dict[str, Any]], db: Session) -> int:
         """Store a batch of messages in the database with deduplication"""
         stored_count = 0
         
@@ -155,7 +159,7 @@ class BaileysMessageSyncService:
                     continue
                 
                 # Check if message already exists
-                existing = self.db.query(WhatsAppMessages).filter(
+                existing = db.query(WhatsAppMessages).filter(
                     WhatsAppMessages.message_id == message_id
                 ).first()
                 
@@ -183,15 +187,15 @@ class BaileysMessageSyncService:
                     chat_type="individual" if not remote_jid.endswith("@g.us") else "group"
                 )
                 
-                self.db.add(message)
+                db.add(message)
                 stored_count += 1
             
-            self.db.commit()
+            db.commit()
             logger.info(f"Stored {stored_count} new messages for device {device_id}")
             
         except Exception as e:
             logger.error(f"Error storing message batch: {e}")
-            self.db.rollback()
+            db.rollback()
         
         return stored_count
     
@@ -203,24 +207,24 @@ class BaileysMessageSyncService:
             # Register webhook for real-time events
             webhook_url = f"{settings.API_BASE_URL}/api/webhooks/whatsapp/{device_id}"
             
-            response = requests.post(
-                f"{self.engine_url}/session/{device_id}/webhook",
-                json={
-                    "webhook_url": webhook_url,
-                    "events": ["messages.upsert", "chats.set", "messages.set"]
-                },
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                logger.info(f"Event listeners configured for device {device_id}")
-            else:
-                logger.error(f"Failed to setup event listeners: HTTP {response.status_code}")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.engine_url}/session/{device_id}/webhook",
+                    json={
+                        "webhook_url": webhook_url,
+                        "events": ["messages.upsert", "chats.set", "messages.set"]
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    if response.status == 200:
+                        logger.info(f"Event listeners configured for device {device_id}")
+                    else:
+                        logger.error(f"Failed to setup event listeners: HTTP {response.status}")
                 
         except Exception as e:
             logger.error(f"Error setting up event listeners: {e}")
     
-    async def handle_message_upsert(self, device_id: str, event_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def handle_message_upsert(self, device_id: str, event_data: Dict[str, Any], db: Session) -> Dict[str, Any]:
         """
         Handle real-time message upsert events from Baileys.
         This is called by the webhook endpoint.
@@ -236,7 +240,7 @@ class BaileysMessageSyncService:
                     continue
                 
                 # Check for duplicates
-                existing = self.db.query(WhatsAppMessages).filter(
+                existing = db.query(WhatsAppMessages).filter(
                     WhatsAppMessages.message_id == message_id
                 ).first()
                 
@@ -265,17 +269,17 @@ class BaileysMessageSyncService:
                     chat_type="individual" if not remote_jid.endswith("@g.us") else "group"
                 )
                 
-                self.db.add(message)
+                db.add(message)
                 stored_count += 1
             
-            self.db.commit()
+            db.commit()
             logger.info(f"Stored {stored_count} new messages from real-time event for device {device_id}")
             
             # Broadcast new messages via WebSocket
             if stored_count > 0:
                 for msg_data in messages:
-                    if msg_data.get("key", {}).get("id") in [m.message_id for m in self.db.query(WhatsAppMessages).filter(WhatsAppMessages.message_id.in_([msg_data.get("key", {}).get("id") for msg_data in messages])).all()]:
-                        await websocket_manager.broadcast_new_message(msg_data, device_id, self.db)
+                    if msg_data.get("key", {}).get("id") in [m.message_id for m in db.query(WhatsAppMessages).filter(WhatsAppMessages.message_id.in_([msg_data.get("key", {}).get("id") for msg_data in messages])).all()]:
+                        await websocket_manager.broadcast_new_message(msg_data, device_id, db)
             
             return {
                 "success": True,
@@ -284,7 +288,7 @@ class BaileysMessageSyncService:
             
         except Exception as e:
             logger.error(f"Error handling message upsert for device {device_id}: {e}")
-            self.db.rollback()
+            db.rollback()
             return {"success": False, "error": str(e)}
     
     async def handle_chats_set(self, device_id: str, event_data: Dict[str, Any]):
@@ -292,12 +296,12 @@ class BaileysMessageSyncService:
         logger.info(f"Handling chats.set event for device {device_id}")
         # Can be implemented for chat metadata updates if needed
     
-    async def handle_messages_set(self, device_id: str, event_data: Dict[str, Any]):
+    async def handle_messages_set(self, device_id: str, event_data: Dict[str, Any], db: Session):
         """Handle messages.set events for message history updates"""
         logger.info(f"Handling messages.set event for device {device_id}")
         messages = event_data.get("messages", [])
         if messages:
-            await self._store_messages_batch(device_id, messages)
+            await self._store_messages_batch(device_id, messages, db)
     
     def _extract_phone_from_jid(self, remote_jid: str) -> Optional[str]:
         """Extract clean phone number from WhatsApp JID"""
@@ -344,29 +348,34 @@ class BaileysMessageSyncService:
     async def _check_device_status(self, device_id: str) -> Dict[str, Any]:
         """Check device connection status"""
         try:
-            response = requests.get(
-                f"{self.engine_url}/session/{device_id}/status",
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                return {"success": True, "status": response.json().get("status")}
-            else:
-                return {"success": False, "error": f"HTTP {response.status_code}"}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.engine_url}/session/{device_id}/status",
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return {"success": True, "status": data.get("status")}
+                    else:
+                        return {"success": False, "error": f"HTTP {response.status}"}
                 
         except Exception as e:
             return {"success": False, "error": str(e)}
     
-    def get_device_conversations(self, device_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    def get_device_conversations(self, device_id: str, limit: int = 50, db: Session = None) -> List[Dict[str, Any]]:
         """
         Get conversation summary for a device.
         Returns grouped conversations with last message and unread counts.
         """
+        if db is None:
+            logger.warning("get_device_conversations called without db session")
+            return []
+            
         try:
             device_uuid = UUIDService.safe_convert(device_id)
             
             # SQL query for conversation summary
-            query = self.db.execute("""
+            query = db.execute("""
                 SELECT 
                     phone,
                     MAX(contact_name) as contact_name,

@@ -82,62 +82,7 @@ class BackgroundTaskManager:
             self._polling_task.cancel()
 
 
-class SafeBackgroundService:
-    """
-    Alternative implementation using threading for completely synchronous operations.
-    
-    Use this when the background service contains blocking I/O operations
-    that cannot be easily converted to async.
-    """
-    
-    def __init__(self):
-        self._running = False
-        self._thread = None
-        
-    def start_google_sheets_polling(self, interval_seconds: int = 30):
-        """Start Google Sheets polling in a background thread"""
-        import threading
-        import time
-        
-        def polling_loop():
-            self._running = True
-            logger.info(f"Starting Google Sheets polling in thread (interval: {interval_seconds}s)")
-            
-            while self._running:
-                try:
-                    # Create database session for this cycle
-                    db = next(get_db())
-                    
-                    try:
-                        # Process triggers synchronously
-                        from services.google_sheets_automation import GoogleSheetsAutomationService
-                        automation_service = GoogleSheetsAutomationService(db)
-                        
-                        # Run the async method in the thread's event loop
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        
-                        try:
-                            loop.run_until_complete(automation_service.process_all_active_triggers())
-                        finally:
-                            loop.close()
-                            
-                    finally:
-                        db.close()
-                    
-                    # Sleep for interval
-                    time.sleep(interval_seconds)
-                    
-                except Exception as e:
-                    logger.error(f"Error in threaded Google Sheets polling: {e}")
-                    time.sleep(min(10, interval_seconds))  # Shorter retry interval
-        
-        self._thread = threading.Thread(target=polling_loop, daemon=True)
-        self._thread.start()
-        logger.info("Google Sheets polling thread started")
-    
-    def stop(self):
-        """Stop the threaded polling"""
-        self._running = False
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
+# SafeBackgroundService removed due to connection pool exhaustion issues
+# The threaded approach with loop.run_until_complete creates new event loops
+# that compete for database connections, causing pool exhaustion.
+# Use the async BackgroundTaskManager instead.
