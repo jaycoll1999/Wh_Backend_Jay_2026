@@ -30,9 +30,9 @@ class WhatsAppEngineService:
         self._status_check_cooldowns = {}  # {device_id: datetime}
         # 🔥 CRITICAL: Session start locks to prevent duplicate start requests
         self._session_start_locks = {}  # {device_id: datetime} - tracks active session starts
-        self.max_retries = 15  # Increased to 15 (very high to handle slow Render cold starts)
+        self.max_retries = 7  # Reduced to 7 for better user experience (still handles cold starts)
         self.base_timeout = 60 # Increased base timeout
-        self.retry_delays = [5, 10, 15, 20, 30, 45, 60, 90, 120, 150, 180, 210, 240, 270, 300]
+        self.retry_delays = [5, 10, 15, 20, 30, 45, 60]  # 7 retries with progressive delays
         
     def _get_cached_qr(self, device_id: str) -> Optional[Dict[str, Any]]:
         """Get cached QR code if still valid"""

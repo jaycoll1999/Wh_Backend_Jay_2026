@@ -80,29 +80,55 @@ logger = logging.getLogger(__name__)
 background_tasks = []
 
 async def keep_engine_alive():
-    """🔥 [KEEP-ALIVE] Pings the WhatsApp Engine every 10 minutes to prevent Render Free Tier sleep"""
-    from services.whatsapp_engine_service import WhatsAppEngineService
-    # We create a local instance to avoid circular imports if any, though here it's fine
-    engine_service = WhatsAppEngineService()
+    """Background task to ping WhatsApp Engine every 10 minutes to prevent Render cold starts."""
+    from services.engine_keep_alive import initialize_keep_alive
     
-    # Initial delay to let the system boot
-    await asyncio.sleep(20)
+    try:
+        # Initialize the keep-alive service
+        engine_url = settings.WHATSAPP_ENGINE_BASE_URL
+        logger.info(f"Starting engine keep-alive service for {engine_url}")
+        
+        keep_alive_service = initialize_keep_alive(engine_url, ping_interval=600)  # 10 minutes
+        
+        # Keep the service running in the background
+        while True:
+            await asyncio.sleep(60)  # Check every minute if service is still running
+            
+            if not keep_alive_service.running:
+                logger.warning("Keep-alive service stopped, restarting...")
+                keep_alive_service.start()
+                
+            # Log status periodically
+            status = keep_alive_service.get_status()
+            if status["consecutive_failures"] > 0:
+                logger.warning(f"Keep-alive status: {status}")
+                
+    except Exception as e:
+        logger.error(f"Failed to start keep-alive service: {str(e)}")
+        # Fallback to simple pings if keep-alive service fails
+        await _fallback_keep_alive()
+
+async def _fallback_keep_alive():
+    """Fallback keep-alive using simple HTTP requests"""
+    from services.whatsapp_engine_service import engine_service
     
+    logger.info("Using fallback keep-alive method")
     while True:
         try:
-            logger.info("💓 [KEEP-ALIVE] Pinging WhatsApp Engine to keep it awake...")
+            logger.info("PINGING WhatsApp Engine to keep it awake...")
             health = engine_service.check_engine_health()
             if health.get("healthy"):
-                logger.info("✅ [KEEP-ALIVE] Engine is awake and healthy")
+                logger.info("Engine is awake and healthy")
             else:
-                logger.warning(f"⚠️ [KEEP-ALIVE] Engine ping returned unhealthy: {health.get('error')}")
+                logger.warning(f"Engine ping returned unhealthy: {health.get('error')}")
         except Exception as e:
-            logger.error(f"❌ [KEEP-ALIVE] Failed to ping engine: {str(e)}")
+            logger.error(f"Failed to ping engine: {str(e)}")
         
         # Ping every 10 minutes (Render spins down after 15 mins of inactivity)
         await asyncio.sleep(600)
 
 async def auto_migrate_db():
+    """Smartly adds missing columns only if they don't exist."""
     """🚀 [AUTO-HEALER] Smartly adds missing columns only if they don't exist."""
     # Wait for the server to be fully ready (reduced from 5s to 2s for faster startup)
     await asyncio.sleep(2)
@@ -197,18 +223,18 @@ async def lifespan(app: FastAPI):
         schedule_daily_tasks()
         logger.info("✅ [CAMPAIGNS] Daily tasks scheduled")
     except Exception as e:
-        logger.error(f"❌ [CAMPAIGNS] Failed to schedule tasks: {e}")
+        logger.error(f"[CAMPAIGNS] Failed to schedule tasks: {e}")
     
-    # 🔥 [DISABLED] Trigger auto-start removed to prevent startup hanging in production
+    # Trigger auto-start removed to prevent startup hanging in production
     # Triggers can be manually started via API endpoints if needed
     
-    # 🔥 [KEEP-ALIVE] Engine background task disabled as requested
-    # logger.info("💓 [KEEP-ALIVE] Starting engine background task...")
-    # ka_task = asyncio.create_task(keep_engine_alive())
-    # ka_task.set_name("EngineKeepAlive")
-    # background_tasks.append(ka_task)
+    # Keep-alive Engine background task to prevent Render cold starts
+    logger.info("Starting engine keep-alive background task...")
+    ka_task = asyncio.create_task(keep_engine_alive())
+    ka_task.set_name("EngineKeepAlive")
+    background_tasks.append(ka_task)
     
-    logger.info("🚀 [READY] WhatsApp Platform Backend is ready to serve requests")
+    logger.info("[READY] WhatsApp Platform Backend is ready to serve requests")
     yield
     
     # Graceful shutdown
