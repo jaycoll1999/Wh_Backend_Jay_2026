@@ -60,6 +60,14 @@ class UnifiedWhatsAppService:
         credits_to_deduct = self.message_usage_service.get_deduction_rate(message_data.user_id)
         
         # 4. CREATE MESSAGE RECORD
+        # Validate message_type against allowed enum values
+        message_type_str = message_data.type.upper()
+        allowed_types = ['OTP', 'TEXT', 'TEMPLATE', 'MEDIA', 'BASE64', 'IMAGE', 'VIDEO', 'DOCUMENT', 'AUDIO']
+        
+        if message_type_str not in allowed_types:
+            logger.warning(f"Invalid message_type '{message_type_str}', defaulting to TEXT")
+            message_type_str = 'TEXT'
+        
         message = Message(
             message_id=str(uuid.uuid4()),
             busi_user_id=message_data.user_id,
@@ -68,7 +76,7 @@ class UnifiedWhatsAppService:
             sender_number=device.device_id,
             receiver_number=receiver,
             message_body=self._build_message_body(message_data),
-            message_type=message_data.type.upper(),
+            message_type=message_type_str,
             status="PENDING",
             credits_used=credits_to_deduct,
             created_at=datetime.utcnow()
@@ -334,12 +342,20 @@ class UnifiedWhatsAppService:
         """Process incoming webhook message"""
         try:
             # Store incoming message
+            # Validate message_type against allowed enum values
+            message_type_str = webhook_data.message_type.upper()
+            allowed_types = ['OTP', 'TEXT', 'TEMPLATE', 'MEDIA', 'BASE64', 'IMAGE', 'VIDEO', 'DOCUMENT', 'AUDIO']
+            
+            if message_type_str not in allowed_types:
+                logger.warning(f"Invalid webhook message_type '{message_type_str}', defaulting to TEXT")
+                message_type_str = 'TEXT'
+            
             message = Message(
                 message_id=webhook_data.message_id,
                 busi_user_id=self._get_user_by_device(webhook_data.device_id),
                 receiver_number=webhook_data.from_number,
                 message_body=webhook_data.message_content,
-                message_type=webhook_data.message_type.upper(),
+                message_type=message_type_str,
                 status=webhook_data.status,
                 created_at=webhook_data.timestamp
             )

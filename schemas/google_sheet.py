@@ -98,7 +98,6 @@ class TriggerCreateRequest(BaseModel):
     send_time_column: Optional[str] = None
     message_column: Optional[str] = None
     scheduled_at: Optional[datetime] = None
-    source_type: Optional[str] = "google_sheet" # NEW: "google_sheet" or "file"
     source_file_url: Optional[str] = None
     media_url: Optional[str] = None
     media_type: Optional[str] = None
@@ -227,7 +226,6 @@ class TriggerResponse(BaseModel):
     message_column: Optional[str] = None
     webhook_url: Optional[str] = None
     scheduled_at: Optional[datetime] = None
-    source_type: Optional[str] = "google_sheet" # NEW: "google_sheet" or "file"
     media_url: Optional[str] = None
     media_type: Optional[str] = None
     # Round Robin fields

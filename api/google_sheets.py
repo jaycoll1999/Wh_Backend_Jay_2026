@@ -52,7 +52,7 @@ def get_official_config_service(db: Session = Depends(get_db)) -> OfficialWhatsA
 def get_official_message_service(db: Session = Depends(get_db)) -> OfficialMessageService:
     return OfficialMessageService(db)
 
-def get_current_user(
+async def get_current_user(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_busi_user_id) # Type hint updated to str
 ) -> Any:
@@ -1694,7 +1694,6 @@ async def create_trigger(
             send_time_column=request.send_time_column,
             message_column=request.message_column,
             scheduled_at=request.scheduled_at,
-            source_type="file" if is_file_source else "google_sheet",
             source_file_url=source_file_url,
             media_url=media_url,
             media_type=media_type,
@@ -1942,12 +1941,22 @@ async def delete_trigger(
         # Ensure trigger_id is string to match DB (character varying)
         trigger_id = str(trigger_id) if trigger_id else None
             
-        trigger = db.query(GoogleSheetTrigger).join(GoogleSheet).filter(
+        # First try to find trigger by direct user ownership
+        trigger = db.query(GoogleSheetTrigger).filter(
             and_(
                 GoogleSheetTrigger.trigger_id == trigger_id,
-                GoogleSheet.user_id == current_user.busi_user_id
+                GoogleSheetTrigger.user_id == current_user.busi_user_id
             )
         ).first()
+        
+        # If not found by direct ownership, try via sheet ownership (for backward compatibility)
+        if not trigger:
+            trigger = db.query(GoogleSheetTrigger).join(GoogleSheet).filter(
+                and_(
+                    GoogleSheetTrigger.trigger_id == trigger_id,
+                    GoogleSheet.user_id == current_user.busi_user_id
+                )
+            ).first()
         
         if not trigger:
             raise HTTPException(status_code=404, detail="Trigger not found")
@@ -2224,21 +2233,15 @@ async def _execute_trigger_process(t_id: str, session: Session, is_manual: bool 
             logger.info(f"🛑 [PROCESS_{t_id}] Trigger disabled or deleted. Skipping.")
         return 0
         
-    sheet = session.query(GoogleSheet).filter(GoogleSheet.id == current_trigger.sheet_id).first()
-    
-    # 🔥 SELF-HEALING SOURCE DETECTION
-    # If sheet is missing but there is a file URL, automatically fix source_type
-    if not sheet and current_trigger.source_type == "google_sheet" and current_trigger.source_file_url:
-        logger.warning(f"🩹 [PROCESS_{t_id}] Sheet missing but file found. Auto-correcting source_type to 'file'.")
-        current_trigger.source_type = "file"
-        session.commit()
-
-    if not sheet and current_trigger.source_type == "google_sheet":
-        logger.error(f"❌ [PROCESS_{t_id}] Sheet missing for Google Sheet trigger {t_id}.")
-        return 0
+    sheet = session.query(GoogleSheet).filter(GoogleSheet.id == current_trigger.sheet_id).first() if current_trigger.sheet_id else None
     
     # Prefix for logging
-    source_info = sheet.spreadsheet_id if sheet else (os.path.basename(current_trigger.source_file_url or "Unknown File"))
+    if sheet:
+        source_info = sheet.spreadsheet_id
+    elif current_trigger.source_file_url:
+        source_info = os.path.basename(current_trigger.source_file_url)
+    else:
+        source_info = "Unknown Source"
         
     automation_service = GoogleSheetsAutomationServiceUnofficial(session)
     
@@ -2246,13 +2249,13 @@ async def _execute_trigger_process(t_id: str, session: Session, is_manual: bool 
     logger.info(f"{prefix} [{t_id}] Checking source {source_info}...")
     
     try:
-        if current_trigger.source_type == "google_sheet" and sheet:
+        if sheet:
             rows_data, headers_data = await asyncio.to_thread(
                 automation_service.sheets_service.get_sheet_data_with_headers,
                 spreadsheet_id=sheet.spreadsheet_id,
                 worksheet_name=sheet.worksheet_name
             )
-        elif current_trigger.source_type == "file" and current_trigger.source_file_url:
+        elif current_trigger.source_file_url:
             rows_data, headers_data = automation_service._load_local_file_data(current_trigger.source_file_url)
             if not rows_data and not headers_data:
                 logger.warning(f"⚠️ [PROCESS_{t_id}] File missing or empty. Auto-pausing trigger.")
@@ -2367,12 +2370,22 @@ async def start_trigger(
         # trigger_id in DB is String(50), no UUID conversion needed!
         trigger_uuid = str(trigger_id)
             
-        trigger = db.query(GoogleSheetTrigger).join(GoogleSheet).filter(
+        # First try to find trigger by direct user ownership
+        trigger = db.query(GoogleSheetTrigger).filter(
             and_(
                 GoogleSheetTrigger.trigger_id == trigger_uuid,
-                GoogleSheet.user_id == current_user.busi_user_id
+                GoogleSheetTrigger.user_id == current_user.busi_user_id
             )
         ).first()
+        
+        # If not found by direct ownership, try via sheet ownership (for backward compatibility)
+        if not trigger:
+            trigger = db.query(GoogleSheetTrigger).join(GoogleSheet).filter(
+                and_(
+                    GoogleSheetTrigger.trigger_id == trigger_uuid,
+                    GoogleSheet.user_id == current_user.busi_user_id
+                )
+            ).first()
         
         if not trigger:
             raise HTTPException(status_code=404, detail="Trigger not found")
@@ -2406,12 +2419,22 @@ async def stop_trigger(
         # Validate trigger ownership
         trigger_uuid = str(trigger_id)
             
-        trigger = db.query(GoogleSheetTrigger).join(GoogleSheet).filter(
+        # First try to find trigger by direct user ownership
+        trigger = db.query(GoogleSheetTrigger).filter(
             and_(
                 GoogleSheetTrigger.trigger_id == trigger_uuid,
-                GoogleSheet.user_id == current_user.busi_user_id
+                GoogleSheetTrigger.user_id == current_user.busi_user_id
             )
         ).first()
+        
+        # If not found by direct ownership, try via sheet ownership (for backward compatibility)
+        if not trigger:
+            trigger = db.query(GoogleSheetTrigger).join(GoogleSheet).filter(
+                and_(
+                    GoogleSheetTrigger.trigger_id == trigger_uuid,
+                    GoogleSheet.user_id == current_user.busi_user_id
+                )
+            ).first()
         
         if not trigger:
             raise HTTPException(status_code=404, detail="Trigger not found")
@@ -2500,12 +2523,22 @@ async def get_trigger_history(
         if isinstance(trigger_id, str):
             trigger_id = str(trigger_id)
             
-        trigger = db.query(GoogleSheetTrigger).join(GoogleSheet).filter(
+        # First try to find trigger by direct user ownership
+        trigger = db.query(GoogleSheetTrigger).filter(
             and_(
                 GoogleSheetTrigger.trigger_id == trigger_id,
-                GoogleSheet.user_id == current_user.busi_user_id
+                GoogleSheetTrigger.user_id == current_user.busi_user_id
             )
         ).first()
+        
+        # If not found by direct ownership, try via sheet ownership (for backward compatibility)
+        if not trigger:
+            trigger = db.query(GoogleSheetTrigger).join(GoogleSheet).filter(
+                and_(
+                    GoogleSheetTrigger.trigger_id == trigger_id,
+                    GoogleSheet.user_id == current_user.busi_user_id
+                )
+            ).first()
         
         if not trigger:
             raise HTTPException(status_code=404, detail="Trigger not found")

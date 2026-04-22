@@ -29,7 +29,6 @@ class GoogleSheetTrigger(Base):
     trigger_id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("businesses.busi_user_id", ondelete="CASCADE"), nullable=True) # NEW: Direct ownership
     sheet_id = Column(String(36), ForeignKey("google_sheets.id"), nullable=True) # Linked sheet (Optional for Files)
-    source_type = Column(String, nullable=False, default="google_sheet") # NEW: "google_sheet" or "file"
     device_id = Column(String(36), nullable=True)  # WhatsApp Device
     trigger_type = Column(String, nullable=False)  # DB uses character varying, not Enum
     is_enabled = Column(Boolean, default=True)
