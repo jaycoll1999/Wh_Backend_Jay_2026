@@ -1,7 +1,8 @@
 from pydantic_settings import BaseSettings
 from typing import Optional, Any
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 import os
+import logging
 
 
 class Settings(BaseSettings):
@@ -13,7 +14,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # Database
-    DATABASE_URL: str = "postgresql://whatsapp_platform_mhnw_user:nComdm17QkuwCzuxi2sMjZrIbXXLV8FG@dpg-d7cbd05ckfvc7387lfog-a.oregon-postgres.render.com/whatsapp_platform_mhnw"
+    DATABASE_URL: str = "postgresql://meassage_api_6631_user:VXmYtwhnsZsaXRc49xWHJN9g0MxD7ndW@dpg-d7ea64hf9bms738jajqg-a.oregon-postgres.render.com/meassage_api_6631"
 
     # Security
     SECRET_KEY: str = "your-super-secret-key-here-change-in-production"
@@ -91,10 +92,25 @@ class Settings(BaseSettings):
             }
         )
         
-        # Log pool settings for debugging
-        import logging
+        # 🔥 Add connection pool event listeners for monitoring
         logger = logging.getLogger(__name__)
-        logger.info(f"🔧 Database engine created with pool_size=25, max_overflow=25")
+        
+        @event.listens_for(self._engine, "checkout")
+        def receive_checkout(dbapi_connection, connection_record, connection_proxy):
+            """Log when connection is checked out from pool"""
+            pool = self._engine.pool
+            checked_out = pool.checkedout()
+            total = pool.size() + pool.overflow()
+            if checked_out > 40:  # Warn if approaching limit
+                logger.warning(f"⚠️ [POOL] Connection checked out: {checked_out}/{total} in use")
+        
+        @event.listens_for(self._engine, "checkin")
+        def receive_checkin(dbapi_connection, connection_record):
+            """Log when connection is returned to pool"""
+            logger.debug(f"🔒 [POOL] Connection returned to pool")
+        
+        # Log pool settings for debugging
+        logger.info(f"🔧 Database engine created with pool_size=25, max_overflow=25 (total max=50)")
         
         return self._engine
 

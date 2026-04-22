@@ -462,10 +462,14 @@ Errors:        {error_count}
 """
             logger.info(report)
             
+            # 🔥 FIX: Return processed count for tracking
+            return processed_count
+            
         except Exception as e:
             logger.error(f"   ❌ [AUTOMATION] Trigger {trigger.trigger_id} failed: {e}")
             import traceback
             logger.error(traceback.format_exc())
+            return 0
     
     async def process_row_for_trigger(self, sheet: GoogleSheet, trigger: GoogleSheetTrigger, row_info: Dict[str, Any], device_id: Any = None, headers: Optional[List[str]] = None, processed_rows: set = None):
         """

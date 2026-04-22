@@ -374,16 +374,28 @@ async def database_health_check(db = Depends(get_db)):
         db.execute(text("SELECT 1"))
         # 🔥 Log actual pool status
         pool = engine.pool
+        checked_out = pool.checkedout()
+        total_connections = pool.size() + pool.overflow()
+        usage_percent = (checked_out / total_connections * 100) if total_connections > 0 else 0
+        
+        # Log warning if pool usage is high
+        if usage_percent > 80:
+            logger.warning(f"⚠️ [DB POOL] High usage: {usage_percent:.1f}% ({checked_out}/{total_connections} connections)")
+        elif usage_percent > 60:
+            logger.info(f"📊 [DB POOL] Usage: {usage_percent:.1f}% ({checked_out}/{total_connections} connections)")
+        
         return {
             "status": "healthy",
             "service": "PostgreSQL Database",
             "pool": {
                 "size": pool.size(),
                 "checked_in": pool.checkedin(),
-                "checked_out": pool.checkedout(),
+                "checked_out": checked_out,
                 "overflow": pool.overflow(),
                 "configured_size": 25,
-                "configured_max_overflow": 25
+                "configured_max_overflow": 25,
+                "total_max_connections": 50,
+                "usage_percent": round(usage_percent, 2)
             }
         }
     except Exception as e:

@@ -1340,7 +1340,7 @@ async def list_all_user_triggers(
     current_user: BusiUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """🚀 List ALL triggers for this user across all sheets and files."""
+    """🚀 List ALL triggers for this user across all sheets and files with statistics."""
     try:
         # Get all sheets owned by user
         user_sheets = db.query(GoogleSheet).filter(GoogleSheet.user_id == str(current_user.busi_user_id)).all()
@@ -1371,6 +1371,37 @@ async def list_all_user_triggers(
             d_name = device_map.get(str(trigger.device_id)) if trigger.device_id else "Official API"
             s_name = sheet_map.get(trigger.sheet_id) if trigger.sheet_id else f"File: {os.path.basename(trigger.source_file_url or '')[:20]}..."
             
+            # 🔥 NEW: Calculate trigger statistics
+            total_rows = 0
+            processed_rows = 0
+            completion_status = "pending"
+            
+            # Get total rows from sheet if available
+            if trigger.sheet_id:
+                sheet = db.query(GoogleSheet).filter(GoogleSheet.id == trigger.sheet_id).first()
+                if sheet:
+                    total_rows = sheet.total_rows or 0
+            
+            # Count processed rows from trigger history
+            try:
+                processed_count = db.query(GoogleSheetTriggerHistory).filter(
+                    and_(
+                        GoogleSheetTriggerHistory.trigger_id == str(trigger.trigger_id),
+                        GoogleSheetTriggerHistory.status == TriggerHistoryStatus.SENT.value
+                    )
+                ).count()
+                processed_rows = processed_count
+            except Exception as e:
+                logger.warning(f"Failed to count processed rows for trigger {trigger.trigger_id}: {e}")
+            
+            # Determine completion status
+            if trigger.is_enabled:
+                completion_status = "running"
+            elif processed_rows > 0:
+                completion_status = "completed"
+            else:
+                completion_status = "pending"
+            
             result.append(TriggerResponse(
                 trigger_id=trigger.trigger_id,
                 sheet_id=trigger.sheet_id,
@@ -1392,7 +1423,10 @@ async def list_all_user_triggers(
                 scheduled_at=trigger.scheduled_at,
                 source_file_url=trigger.source_file_url,
                 media_url=trigger.media_url,
-                media_type=trigger.media_type
+                media_type=trigger.media_type,
+                total_rows=total_rows,
+                processed_rows=processed_rows,
+                completion_status=completion_status
             ))
         
         return result
@@ -1902,7 +1936,7 @@ async def delete_trigger(
     current_user: BusiUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Delete a trigger."""
+    """Delete a trigger and stop any running background task."""
     try:
         # Validate trigger ownership
         # Ensure trigger_id is string to match DB (character varying)
@@ -1917,6 +1951,15 @@ async def delete_trigger(
         
         if not trigger:
             raise HTTPException(status_code=404, detail="Trigger not found")
+        
+        # 🔥 FIX: Cancel background task before deleting trigger
+        task_id = str(trigger.trigger_id)
+        if task_id in active_trigger_tasks:
+            task = active_trigger_tasks[task_id]
+            if not task.done():
+                task.cancel()
+                logger.info(f"🛑 Cancelled background task for trigger {task_id}")
+            del active_trigger_tasks[task_id]
         
         db.delete(trigger)
         db.commit()
@@ -2030,7 +2073,7 @@ async def fire_triggers_now(
     current_user: BusiUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """🔥 MANUALLY FIRE all enabled triggers for this user ONCE"""
+    """🔥 MANUALLY FIRE all enabled triggers for this user ONCE and disable them after completion"""
     try:
         from sqlalchemy import and_
         # Find all enabled triggers for this user's sheets
@@ -2052,7 +2095,15 @@ async def fire_triggers_now(
                 from db.session import SessionLocal
                 session = SessionLocal()
                 try:
-                    await _execute_trigger_process(tid, session, is_manual=True)
+                    processed_count = await _execute_trigger_process(tid, session, is_manual=True)
+                    # 🔥 FIX: Disable trigger after one-time manual fire
+                    if processed_count > 0 or processed_count == 0:
+                        # Disable regardless of processed count - it's a one-time fire
+                        current_trigger = session.query(GoogleSheetTrigger).filter(GoogleSheetTrigger.trigger_id == tid).first()
+                        if current_trigger:
+                            current_trigger.is_enabled = False
+                            session.commit()
+                            logger.info(f"✅ [FIRE_NOW] Trigger {tid} disabled after one-time manual fire.")
                 finally:
                     session.close()
 
@@ -2061,7 +2112,7 @@ async def fire_triggers_now(
             
         return {
             "success": True, 
-            "message": f"Successfully fired {fired_count} triggers. Check logs for progress.",
+            "message": f"Successfully fired {fired_count} triggers. Triggers will be disabled after completion.",
             "total_fired": fired_count
         }
     except Exception as e:
@@ -2164,14 +2215,14 @@ async def start_all_enabled_triggers_on_boot():
 
 
 async def _execute_trigger_process(t_id: str, session: Session, is_manual: bool = False):
-    """Core logic to process a single trigger once"""
+    """Core logic to process a single trigger once. Returns number of rows processed."""
     from services.google_sheets_automation_unofficial_only import GoogleSheetsAutomationServiceUnofficial
     
     current_trigger = session.query(GoogleSheetTrigger).filter(GoogleSheetTrigger.trigger_id == t_id).first()
     if not current_trigger or not current_trigger.is_enabled:
         if is_manual:
             logger.info(f"🛑 [PROCESS_{t_id}] Trigger disabled or deleted. Skipping.")
-        return False
+        return 0
         
     sheet = session.query(GoogleSheet).filter(GoogleSheet.id == current_trigger.sheet_id).first()
     
@@ -2184,7 +2235,7 @@ async def _execute_trigger_process(t_id: str, session: Session, is_manual: bool 
 
     if not sheet and current_trigger.source_type == "google_sheet":
         logger.error(f"❌ [PROCESS_{t_id}] Sheet missing for Google Sheet trigger {t_id}.")
-        return False
+        return 0
     
     # Prefix for logging
     source_info = sheet.spreadsheet_id if sheet else (os.path.basename(current_trigger.source_file_url or "Unknown File"))
@@ -2207,21 +2258,23 @@ async def _execute_trigger_process(t_id: str, session: Session, is_manual: bool 
                 logger.warning(f"⚠️ [PROCESS_{t_id}] File missing or empty. Auto-pausing trigger.")
                 current_trigger.is_enabled = False
                 session.commit()
-                return False
+                return 0
         else:
             logger.error(f"❌ [PROCESS_{t_id}] Missing data source configuration (Sheet or File)")
-            return False
+            return 0
         
         if rows_data:
             logger.info(f"📊 [{t_id}] Found {len(rows_data)} rows. Processing triggers...")
-            await automation_service.process_single_trigger(sheet, current_trigger, rows_data, headers_data)
+            # 🔥 FIX: Get processed count from automation service
+            processed_count = await automation_service.process_single_trigger(sheet, current_trigger, rows_data, headers_data)
+            return processed_count
         else:
             from datetime import datetime
             logger.info(f"⏳ [{t_id}] Sheet is empty. (Time: {datetime.now().strftime('%H:%M:%S')})")
-        return True
+        return 0
     except Exception as e:
         logger.error(f"🔥 [{t_id}] Error in trigger process: {e}")
-        return False
+        return 0
 
 async def _trigger_worker_task(t_id: str):
     # We need a new session for the background task
@@ -2233,6 +2286,10 @@ async def _trigger_worker_task(t_id: str):
     # ⚡ [PERFORMANCE] Poll every 15 seconds to keep system fast and responsive
     interval = 15
     is_first_run = True
+    
+    # 🔥 FIX: Track consecutive empty runs to stop trigger when all rows processed
+    consecutive_empty_runs = 0
+    MAX_EMPTY_RUNS = 3  # Stop after 3 consecutive runs with no rows processed
     
     # 🔥 STAGGERED START: Spreads out multiple triggers to prevent slamming Google API at once
     import random
@@ -2264,7 +2321,24 @@ async def _trigger_worker_task(t_id: str):
                     del active_trigger_tasks[t_id]
                 break
 
-            await _execute_trigger_process(t_id, session, is_manual=False)
+            # 🔥 FIX: Execute trigger and get processed count
+            processed_count = await _execute_trigger_process(t_id, session, is_manual=False)
+            
+            # 🔥 FIX: Stop trigger if no rows processed consecutively (all rows completed)
+            if processed_count == 0:
+                consecutive_empty_runs += 1
+                logger.info(f"⏳ [WORKER_{t_id}] No rows processed. Empty run count: {consecutive_empty_runs}/{MAX_EMPTY_RUNS}")
+                
+                if consecutive_empty_runs >= MAX_EMPTY_RUNS:
+                    logger.info(f"✅ [WORKER_{t_id}] All rows processed (no rows for {MAX_EMPTY_RUNS} consecutive runs). Disabling and stopping worker.")
+                    current_trigger.is_enabled = False
+                    session.commit()
+                    if t_id in active_trigger_tasks and active_trigger_tasks[t_id] == current_task:
+                        del active_trigger_tasks[t_id]
+                    break
+            else:
+                consecutive_empty_runs = 0  # Reset counter if rows were processed
+                logger.info(f"📊 [WORKER_{t_id}] Processed {processed_count} rows. Continuing to monitor...")
                 
         except asyncio.CancelledError:
             logger.info(f"🧘 [WORKER_{t_id}] Worker gracefully cancelled.")

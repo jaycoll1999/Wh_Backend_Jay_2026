@@ -234,6 +234,10 @@ class TriggerResponse(BaseModel):
     multi_device_ids: Optional[List[str]] = None
     multi_templates: Optional[List[str]] = None
     trigger_config: Optional[Dict[str, Any]] = None
+    # 🔥 NEW: Trigger statistics for UI
+    total_rows: Optional[int] = None
+    processed_rows: Optional[int] = None
+    completion_status: Optional[str] = None  # "pending", "running", "completed"
 
     model_config = ConfigDict(from_attributes=True)
 

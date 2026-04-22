@@ -18,23 +18,27 @@ def check_busi_user_plan(db: Session, busi_user_id: str):
         )
     
     # 1. Check Plan Expiry
+    # 🔥 FIX: If user has plan_name and credits, allow even if plan_expiry is not set
+    # This handles cases where plan_expiry wasn't set properly during purchase
     if not user.plan_expiry:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No active plan found. Please purchase a plan to continue."
-        )
-    
-    # Robust comparison: Ensure both are aware or both are naive
-    now = datetime.now(timezone.utc)
-    plan_expiry = user.plan_expiry
-    if plan_expiry.tzinfo is None:
-        plan_expiry = plan_expiry.replace(tzinfo=timezone.utc)
+        if not user.plan_name or (user.credits_remaining or 0) <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No active plan found. Please purchase a plan to continue."
+            )
+        # If they have plan_name and credits, skip expiry check
+    else:
+        # Robust comparison: Ensure both are aware or both are naive
+        now = datetime.now(timezone.utc)
+        plan_expiry = user.plan_expiry
+        if plan_expiry.tzinfo is None:
+            plan_expiry = plan_expiry.replace(tzinfo=timezone.utc)
 
-    if plan_expiry < now:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your plan has expired. Please renew your plan to continue."
-        )
+        if plan_expiry < now:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your plan has expired. Please renew your plan to continue."
+            )
     
     # 2. Check Credits
     if (user.credits_remaining or 0) <= 0:
