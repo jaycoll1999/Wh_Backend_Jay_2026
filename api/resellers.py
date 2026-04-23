@@ -161,7 +161,7 @@ async def login_reseller(login_data: ResellerLoginSchema, db: Session = Depends(
                     organization_type=reseller.organization_type,
                     business_description=reseller.business_description,
                     erp_system=reseller.erp_system,
-                    gstin=reseller.gstin
+                    gstin=reseller.gstin if reseller.gstin else None
                 ) if reseller.business_name is not None else None,
                 address=AddressSchema(
                     full_address=reseller.full_address,
@@ -246,7 +246,7 @@ async def get_current_reseller(
             organization_type=reseller.organization_type,
             business_description=reseller.business_description,
             erp_system=reseller.erp_system,
-            gstin=reseller.gstin
+            gstin=reseller.gstin if reseller.gstin else None
         ) if reseller.business_name is not None else None,
         address=AddressSchema(
             full_address=reseller.full_address,

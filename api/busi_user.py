@@ -65,7 +65,7 @@ def map_busi_user_to_response(busi_user, db: Session = None) -> BusiUserResponse
                 "organization_type": getattr(busi_user, 'organization_type', None),
                 "business_description": busi_user.business_description,
                 "erp_system": busi_user.erp_system,
-                "gstin": busi_user.gstin,
+                "gstin": busi_user.gstin if busi_user.gstin else None,
                 "bank_name": getattr(busi_user, 'bank_name', None)
             },
             "address": {

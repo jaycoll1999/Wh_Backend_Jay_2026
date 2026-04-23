@@ -80,21 +80,20 @@ class AuditLogService:
         
         return logs, total_count, filtered_count
 
-    def get_last_activity_days_ago(self, reseller_id: Any) -> Optional[int]:
-        if reseller_id:
-            reseller_id = str(reseller_id)
-
+    def get_last_activity_days_ago(self, reseller_id: Any) -> int:
         query = self.db.query(AuditLog.created_at)
-        if reseller_id:
-            query = query.filter(AuditLog.reseller_id == reseller_id)
-            
-        last_log = query.order_by(desc(AuditLog.created_at)).first()
         
+        # Only filter by reseller_id if it's provided (not None or empty string)
+        if reseller_id and str(reseller_id).strip():
+            query = query.filter(AuditLog.reseller_id == str(reseller_id))
+
+        last_log = query.order_by(desc(AuditLog.created_at)).first()
+
         if last_log and last_log[0]:
             log_time = last_log[0]
             if log_time.tzinfo is None:
                 log_time = log_time.replace(tzinfo=timezone.utc)
-            
+
             diff = datetime.now(timezone.utc) - log_time
             return diff.days
-        return None
+        return 0

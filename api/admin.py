@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import List, Optional, Any
+import shutil
 from db.session import get_db
 from models.admin import MasterAdmin
 from models.reseller import Reseller
@@ -138,6 +139,7 @@ async def get_admin_profile(
         "business_name": admin_obj.business_name or "Not Provided",
         "gstin": admin_obj.gstin or "Not Provided",
         "bio": admin_obj.bio or "Experienced system administrator specializing in large-scale WhatsApp infrastructure and automation systems.",
+        "profile_image": admin_obj.profile_image,
         "stats": [
             { "label": "Active Campaigns", "value": str(total_campaigns) },
             { "label": "Users Managed", "value": f"{users_managed}" },
@@ -166,6 +168,50 @@ async def update_admin_profile(
     
     db.commit()
     return {"message": "Profile updated successfully"}
+
+@router.post("/profile/upload-image")
+async def upload_admin_profile_image(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_admin: MasterAdmin = Depends(get_current_user)
+):
+    """Upload profile image for admin"""
+    # Verify we are indeed an admin
+    if not isinstance(current_admin, MasterAdmin):
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    
+    # Validate file type
+    allowed_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+    file_extension = file.filename.lower().split('.')[-1] if '.' in file.filename else ''
+    if f".{file_extension}" not in allowed_extensions:
+        raise HTTPException(status_code=400, detail="Invalid file type. Only JPG, JPEG, PNG, GIF, and WEBP are allowed.")
+    
+    # Create uploads directory if it doesn't exist
+    import os
+    upload_dir = "uploads/profile_images"
+    os.makedirs(upload_dir, exist_ok=True)
+    
+    # Generate unique filename
+    import uuid
+    unique_filename = f"{uuid.uuid4()}_{file.filename}"
+    file_path = os.path.join(upload_dir, unique_filename)
+    
+    # Save file
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+    
+    # Update admin's profile_image field
+    admin_obj = current_admin
+    admin_obj.profile_image = f"/uploads/profile_images/{unique_filename}"
+    db.commit()
+    
+    return {
+        "message": "Profile image uploaded successfully",
+        "profile_image_url": admin_obj.profile_image
+    }
 
 @router.get("/plans")
 async def list_plans(

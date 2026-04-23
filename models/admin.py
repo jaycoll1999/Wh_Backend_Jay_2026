@@ -16,6 +16,7 @@ class MasterAdmin(Base):
     gstin = Column(String(20), nullable=True)
     bio = Column(String, nullable=True)
     location = Column(String(255), nullable=True)
+    profile_image = Column(String(500), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

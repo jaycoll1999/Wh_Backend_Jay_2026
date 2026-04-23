@@ -45,5 +45,5 @@ class AuditLogCreate(BaseModel):
 class AuditLogResponse(BaseModel):
     total: int
     filtered: int
-    last_activity_days_ago: Optional[int] = None
+    last_activity_days_ago: int
     logs: List[AuditLogSchema]
