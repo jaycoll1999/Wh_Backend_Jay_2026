@@ -40,4 +40,7 @@ from .payment_order import PaymentOrder
 # Import ContactGroup models
 from .contact_group import ContactGroup, Contact
 
-__all__ = ["Base", "Reseller", "MasterAdmin", "Plan", "BusiUser", "Device", "CreditDistribution", "Message", "DeviceSession", "MessageUsageCreditLog", "ResellerAnalytics", "BusinessUserAnalytics", "OfficialWhatsAppConfig", "WhatsAppTemplate", "WhatsAppWebhookLog", "GoogleSheet", "GoogleSheetTrigger", "GoogleSheetTriggerHistory", "WhatsAppInbox", "QuickReply", "WhatsAppMessages", "Campaign", "CampaignDevice", "MessageTemplate", "MessageLog", "AuditLog", "PaymentOrder", "ContactGroup", "Contact"]
+# Import PasswordResetToken
+from .password_reset_token import PasswordResetToken
+
+__all__ = ["Base", "Reseller", "MasterAdmin", "Plan", "BusiUser", "Device", "CreditDistribution", "Message", "DeviceSession", "MessageUsageCreditLog", "ResellerAnalytics", "BusinessUserAnalytics", "OfficialWhatsAppConfig", "WhatsAppTemplate", "WhatsAppWebhookLog", "GoogleSheet", "GoogleSheetTrigger", "GoogleSheetTriggerHistory", "WhatsAppInbox", "QuickReply", "WhatsAppMessages", "Campaign", "CampaignDevice", "MessageTemplate", "MessageLog", "AuditLog", "PaymentOrder", "ContactGroup", "Contact", "PasswordResetToken"]

@@ -364,7 +364,7 @@ app.include_router(me_router, prefix="/api")
 
 # Ensure uploads directory exists
 import os
-upload_dirs = ["uploads", "uploads/campaign_data", "uploads/trigger_media"]
+upload_dirs = ["uploads", "uploads/campaign_data", "uploads/trigger_media", "uploads/profile_images"]
 for d in upload_dirs:
     if not os.path.exists(d):
         os.makedirs(d, exist_ok=True)

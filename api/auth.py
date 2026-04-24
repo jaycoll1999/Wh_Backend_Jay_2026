@@ -6,11 +6,15 @@ from models.reseller import Reseller
 from schemas.auth_schema import ChangePasswordRequest, ChangePasswordResponse, RefreshTokenRequest, TokenRefreshResponse
 from core.security import verify_token, verify_password, get_password_hash, create_access_token
 from services.reseller_service import ResellerService
+from services.email_service import email_service
+from models.password_reset_token import PasswordResetToken
+from models.busi_user import BusiUser
+from datetime import datetime, timedelta
+import os
+from pydantic import BaseModel
 
 router = APIRouter(tags=["Authentication"])
 
-from models.busi_user import BusiUser 
-from models.reseller import Reseller
 from models.admin import MasterAdmin
 
 # Helper to get token
@@ -224,3 +228,120 @@ async def refresh_access_token(
         access_token=new_access_token,
         token_type="bearer"
     )
+
+# Password Reset Endpoints
+class PasswordResetRequest(BaseModel):
+    email: str
+
+class PasswordResetConfirm(BaseModel):
+    token: str
+    new_password: str
+
+@router.post("/password-reset/request")
+async def request_password_reset(
+    request_data: PasswordResetRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Request a password reset link for the given email.
+    """
+    email = request_data.email.lower().strip()
+    
+    # Check if email exists in reseller or business user tables
+    reseller = db.query(Reseller).filter(Reseller.email == email).first()
+    busi_user = db.query(BusiUser).filter(BusiUser.email == email).first()
+    
+    if not reseller and not busi_user:
+        # Don't reveal that email doesn't exist for security
+        return {"message": "If the email exists, a reset link has been sent."}
+    
+    # Determine user role
+    user_role = "reseller" if reseller else "business"
+    
+    # Invalidate any existing tokens for this email
+    db.query(PasswordResetToken).filter(PasswordResetToken.email == email).delete()
+    
+    # Generate new token
+    token = PasswordResetToken.generate_token()
+    expires_at = datetime.utcnow() + timedelta(minutes=30)
+    
+    # Save token to database
+    reset_token = PasswordResetToken(
+        token=token,
+        email=email,
+        user_role=user_role,
+        expires_at=expires_at,
+        used=False
+    )
+    db.add(reset_token)
+    db.commit()
+    
+    # Send email with reset link
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    reset_link = f"{frontend_url}/reset-password?token={token}"
+    
+    # Send actual email
+    email_sent = email_service.send_password_reset_email(email, reset_link)
+    
+    if not email_sent:
+        # Log as fallback if email sending fails
+        print(f"PASSWORD RESET LINK for {email}: {reset_link}")
+    
+    return {"message": "If the email exists, a reset link has been sent."}
+
+@router.post("/password-reset/confirm")
+async def confirm_password_reset(
+    request_data: PasswordResetConfirm,
+    db: Session = Depends(get_db)
+):
+    """
+    Confirm password reset using the token and set new password.
+    """
+    token = request_data.token
+    new_password = request_data.new_password
+    
+    # Find the token in database
+    reset_token = db.query(PasswordResetToken).filter(
+        PasswordResetToken.token == token,
+        PasswordResetToken.used == False
+    ).first()
+    
+    if not reset_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token"
+        )
+    
+    # Check if token is expired
+    if reset_token.expires_at < datetime.utcnow():
+        db.delete(reset_token)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reset token has expired"
+        )
+    
+    # Find the user based on email and role
+    email = reset_token.email
+    user_role = reset_token.user_role
+    
+    if user_role == "reseller":
+        user = db.query(Reseller).filter(Reseller.email == email).first()
+    else:
+        user = db.query(BusiUser).filter(BusiUser.email == email).first()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    # Update password
+    user.password_hash = get_password_hash(new_password)
+    
+    # Mark token as used
+    reset_token.used = True
+    
+    db.commit()
+    
+    return {"message": "Password reset successfully"}
