@@ -73,6 +73,7 @@ class BusiUserService:
             credits_used=busi_user_data.wallet.credits_used if busi_user_data.wallet else 0,
             credits_remaining=busi_user_data.wallet.credits_remaining if busi_user_data.wallet else 0,
             whatsapp_mode=busi_user_data.whatsapp_mode,
+            image_url=busi_user_data.profile.image_url,
             created_by=created_by,
         )
 
@@ -165,6 +166,8 @@ class BusiUserService:
                 db_business.phone = busi_user_data.profile.phone
             if busi_user_data.profile.password:
                 db_business.password_hash = get_password_hash(busi_user_data.profile.password)
+            if busi_user_data.profile.image_url is not None:
+                db_business.image_url = busi_user_data.profile.image_url
 
         # Update business fields
         if busi_user_data.business:

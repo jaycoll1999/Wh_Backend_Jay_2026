@@ -10,6 +10,7 @@ class BusiUserProfileSchema(BaseModel):
     email: EmailStr
     phone: str = Field(..., min_length=10, max_length=20)
     password: str = Field(..., min_length=8, max_length=255)
+    image_url: Optional[str] = None
 
 
 class BusiUserProfileResponseSchema(BaseModel):
@@ -17,6 +18,7 @@ class BusiUserProfileResponseSchema(BaseModel):
     username: str
     email: EmailStr
     phone: str
+    image_url: Optional[str] = None
 
 
 class BusiUserInfoSchema(BaseModel):
@@ -58,6 +60,7 @@ class BusiUserProfileUpdateSchema(BaseModel):
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
     password: Optional[str] = None
+    image_url: Optional[str] = None
 
 
 class BusiUserUpdateSchema(BaseModel):

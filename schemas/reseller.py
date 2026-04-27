@@ -10,6 +10,7 @@ class ProfileSchema(BaseModel):
     email: EmailStr
     phone: str = Field(..., min_length=10, max_length=20)
     password: str = Field(..., min_length=8, max_length=255)
+    image_url: Optional[str] = None
 
 
 class ProfileResponseSchema(BaseModel):
@@ -17,6 +18,7 @@ class ProfileResponseSchema(BaseModel):
     username: str
     email: EmailStr
     phone: str
+    image_url: Optional[str] = None
 
 
 class ProfileUpdateSchema(BaseModel):
@@ -25,6 +27,7 @@ class ProfileUpdateSchema(BaseModel):
     email: Optional[EmailStr] = None
     phone: Optional[str] = Field(None, min_length=10, max_length=20)
     password: Optional[str] = Field(None, min_length=8, max_length=255)
+    image_url: Optional[str] = None
 
 
 class BusinessSchema(BaseModel):

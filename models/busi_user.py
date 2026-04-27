@@ -27,6 +27,7 @@ class BusiUser(Base):
     email = Column(String(255), unique=True, nullable=False, index=True)
     phone = Column(String(20), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
+    image_url = Column(Text, nullable=True)
 
     # Business fields
     business_name = Column(String(255), nullable=False)
@@ -159,3 +160,13 @@ class BusiUser(Base):
 
     def __repr__(self):
         return f"<BusiUser(busi_user_id={self.busi_user_id}, username={self.username}, email={self.email})>"
+
+    @property
+    def profile(self):
+        return {
+            "name": self.name,
+            "username": self.username,
+            "email": self.email,
+            "phone": self.phone,
+            "image_url": self.image_url
+        }

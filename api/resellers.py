@@ -154,7 +154,8 @@ async def login_reseller(login_data: ResellerLoginSchema, db: Session = Depends(
                     name=reseller.name,
                     username=reseller.username,
                     email=reseller.email,
-                    phone=reseller.phone
+                    phone=reseller.phone,
+                    image_url=reseller.image_url
                 ),
                 business=BusinessSchema(
                     business_name=reseller.business_name,
@@ -239,7 +240,8 @@ async def get_current_reseller(
             name=reseller.name,
             username=reseller.username,
             email=reseller.email,
-            phone=reseller.phone
+            phone=reseller.phone,
+            image_url=reseller.image_url
         ),
         business=BusinessSchema(
             business_name=reseller.business_name,

@@ -58,7 +58,8 @@ def map_busi_user_to_response(busi_user, db: Session = None) -> BusiUserResponse
                 "name": busi_user.name or "",
                 "username": busi_user.username or "",
                 "email": busi_user.email or "",
-                "phone": busi_user.phone or ""
+                "phone": busi_user.phone or "",
+                "image_url": busi_user.image_url
             },
             "business": {
                 "business_name": busi_user.business_name or "Unknown",

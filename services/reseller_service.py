@@ -55,6 +55,7 @@ class ResellerService:
             total_credits=reseller_data.wallet.total_credits if reseller_data.wallet else 0,
             available_credits=reseller_data.wallet.available_credits if reseller_data.wallet else 0,
             used_credits=reseller_data.wallet.used_credits if reseller_data.wallet else 0,
+            image_url=reseller_data.profile.image_url,
             created_by=created_by,
         )
 
@@ -143,6 +144,8 @@ class ResellerService:
                 db_reseller.phone = reseller_data.profile.phone
             if reseller_data.profile.password:
                 db_reseller.password_hash = get_password_hash(reseller_data.profile.password)
+            if reseller_data.profile.image_url is not None:
+                db_reseller.image_url = reseller_data.profile.image_url
 
         # Update business fields
         if reseller_data.business:

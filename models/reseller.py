@@ -22,6 +22,7 @@ class Reseller(Base):
     email = Column(String(255), unique=True, nullable=False, index=True)
     phone = Column(String(20), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
+    image_url = Column(Text, nullable=True)
 
     # Business fields
     business_name = Column(String(255), nullable=True)
@@ -79,7 +80,8 @@ class Reseller(Base):
             "name": self.name,
             "username": self.username,
             "email": self.email,
-            "phone": self.phone
+            "phone": self.phone,
+            "image_url": self.image_url
         }
     
     @property
