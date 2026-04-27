@@ -223,6 +223,26 @@ async def update_my_profile(
         )
 
 
+@router.delete("/profile/image", response_model=BusiUserResponseSchema)
+async def remove_busi_user_profile_image(
+    busi_user_id: str = Depends(get_current_busi_user_id),
+    busi_user_service: BusiUserService = Depends(get_busi_user_service)
+):
+    """Remove current business user profile image."""
+    busi_user = busi_user_service.get_busi_user_by_id(busi_user_id)
+    if not busi_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="BusiUser not found"
+        )
+    
+    busi_user.image_url = None
+    busi_user_service.db.commit()
+    busi_user_service.db.refresh(busi_user)
+    
+    return map_busi_user_to_response(busi_user, db=busi_user_service.db)
+
+
 @router.get("/analytics", response_model=BusiUserAnalyticsSchema)
 async def get_busi_user_analytics(
     reseller_id: str = Depends(get_current_reseller_token_id),

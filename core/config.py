@@ -83,7 +83,7 @@ class Settings(BaseSettings):
             pool_size=25,  # Production-optimized: not configurable via env
             max_overflow=25,  # Production-optimized: not configurable via env
             pool_timeout=60,  # Increased from 30 to 60 seconds for high load scenarios
-            pool_recycle=3600,  # Increased from 1800 to 3600 (1 hour)
+            pool_recycle=300,  # Reduced from 3600 to 300 (5 minutes) to prevent stale connections
             pool_pre_ping=True,
             connect_args={
                 "connect_timeout": 10,  # Reduced from 30 to 10 seconds

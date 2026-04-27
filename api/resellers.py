@@ -306,6 +306,42 @@ async def update_current_reseller(
         )
 
 
+@router.delete("/profile/image", response_model=ResellerResponseSchema)
+async def remove_reseller_profile_image(
+    token: str = Depends(get_current_reseller_token),
+    db: Session = Depends(get_db)
+):
+    """Remove current reseller profile image."""
+    reseller_service = ResellerService(db)
+    
+    payload = verify_token(token)
+    if not payload or "error" in payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token"
+        )
+    if payload.get("type", "access") != "access":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type. Access token required."
+        )
+    
+    reseller_id = payload.get("sub")
+    reseller = reseller_service.get_reseller_by_id(reseller_id)
+    
+    if not reseller:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Reseller not found"
+        )
+    
+    reseller.image_url = None
+    db.commit()
+    db.refresh(reseller)
+    
+    return ResellerResponseSchema.model_validate(reseller)
+
+
 @router.get("/", response_model=List[ResellerResponseSchema])
 async def get_resellers(
     skip: int = 0,

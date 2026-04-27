@@ -213,6 +213,21 @@ async def upload_admin_profile_image(
         "profile_image_url": admin_obj.profile_image
     }
 
+@router.delete("/profile/image")
+async def remove_admin_profile_image(
+    db: Session = Depends(get_db),
+    current_admin: MasterAdmin = Depends(get_current_user)
+):
+    """Remove profile image for admin"""
+    if not isinstance(current_admin, MasterAdmin):
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    
+    admin_obj = current_admin
+    admin_obj.profile_image = None
+    db.commit()
+    
+    return {"message": "Profile image removed successfully"}
+
 @router.get("/plans")
 async def list_plans(
     category: Optional[str] = None, 
