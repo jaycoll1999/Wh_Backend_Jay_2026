@@ -216,6 +216,14 @@ class DeviceService:
             try:
                 from models.device import SessionStatus
                 device.session_status = SessionStatus(session_status)
+                
+                # 🔥 REQUIREMENT: When engine pushes logged_out, ensure device is deactivated
+                if device.session_status == SessionStatus.logged_out:
+                    device.is_active = False
+                    device.disconnected_at = datetime.now(timezone.utc)
+                    device.deleted_at = datetime.now(timezone.utc)
+                    logger.info(f"✅ Device {device_id} deactivated via engine status update")
+                    
             except ValueError:
                 # If invalid status, use a default
                 logger.warning(f"Invalid session status '{session_status}' for device {device_id}, using 'pending'")
