@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile
 from sqlalchemy.orm import Session
 from typing import List, Optional, Any
 import shutil
+import re
 from db.session import get_db
 from models.admin import MasterAdmin
 from models.reseller import Reseller
@@ -62,6 +63,7 @@ class ResellerCreateRequest(BaseModel):
 
 class AdminProfileUpdateRequest(BaseModel):
     name: str
+    email: str
     phone: str
     business_name: Optional[str] = None
     gstin: Optional[str] = None
@@ -157,17 +159,54 @@ async def update_admin_profile(
     if not isinstance(current_admin, MasterAdmin):
         raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
         
+    # --- Strict Validation ---
+    
+    # 1. Email Validation
+    email = data.email.strip()
+    if not email:
+        return {"status": False, "message": "Email address is required"}
+    if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
+        return {"status": False, "message": "Invalid email format"}
+        
+    # 2. Phone Validation
+    phone = data.phone.strip()
+    if not phone:
+        return {"status": False, "message": "Phone number is required"}
+    # Must be numeric (allow +), 10-15 digits
+    clean_phone = phone.replace("+", "")
+    if not clean_phone.isdigit() or not (10 <= len(clean_phone) <= 15):
+        return {"status": False, "message": "Enter valid phone number (10-15 digits)"}
+        
+    # 3. Company Name Validation
+    business_name = data.business_name.strip() if data.business_name else ""
+    if not business_name:
+        return {"status": False, "message": "Company name is required"}
+    if len(business_name) < 2:
+        return {"status": False, "message": "Company name must be at least 2 characters"}
+    if business_name.isdigit():
+        return {"status": False, "message": "Company name cannot be only numeric"}
+        
+    # 4. GSTIN Validation (Optional)
+    gstin = data.gstin.strip() if data.gstin else ""
+    if gstin:
+        if not re.match(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$", gstin) and len(gstin) != 15:
+            # Fallback to simple length/alphanumeric check if pattern is too strict, 
+            # but requirement says 15-character alphanumeric.
+            if not gstin.isalnum() or len(gstin) != 15:
+                return {"status": False, "message": "Invalid GSTIN format (15-character alphanumeric required)"}
+
     admin_obj = current_admin
     
-    admin_obj.name = data.name
-    admin_obj.phone = data.phone
-    admin_obj.business_name = data.business_name
-    admin_obj.gstin = data.gstin
-    admin_obj.bio = data.bio
-    admin_obj.location = data.location
+    admin_obj.name = data.name.strip()
+    admin_obj.email = email
+    admin_obj.phone = phone
+    admin_obj.business_name = business_name
+    admin_obj.gstin = gstin if gstin else None
+    admin_obj.bio = data.bio.strip()
+    admin_obj.location = data.location.strip()
     
     db.commit()
-    return {"message": "Profile updated successfully"}
+    return {"status": True, "message": "Profile updated successfully"}
 
 @router.post("/profile/upload-image")
 async def upload_admin_profile_image(
@@ -253,6 +292,17 @@ async def create_plan(
 ):
     if not isinstance(current_admin, MasterAdmin):
         raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    
+    # --- Strict Positive Numeric Validation ---
+    if plan_data.price <= 0:
+        return {"status": False, "message": "Invalid value: price must be greater than 0"}
+    if plan_data.credits_offered <= 0:
+        return {"status": False, "message": "Invalid value: credits offered must be greater than 0"}
+    if plan_data.validity_days <= 0:
+        return {"status": False, "message": "Invalid value: validity days must be greater than 0"}
+    if plan_data.deduction_value <= 0:
+        return {"status": False, "message": "Invalid value: unit cost must be greater than 0"}
+
     # Check if plan name exists
     if db.query(Plan).filter(Plan.name == plan_data.name).first():
         raise HTTPException(status_code=400, detail="Plan name already exists")
@@ -298,6 +348,16 @@ async def update_plan(
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
         
+    # --- Strict Positive Numeric Validation for Updates ---
+    if data.price is not None and data.price <= 0:
+        return {"status": False, "message": "Invalid value: price must be greater than 0"}
+    if data.credits_offered is not None and data.credits_offered <= 0:
+        return {"status": False, "message": "Invalid value: credits offered must be greater than 0"}
+    if data.validity_days is not None and data.validity_days <= 0:
+        return {"status": False, "message": "Invalid value: validity days must be greater than 0"}
+    if data.deduction_value is not None and data.deduction_value <= 0:
+        return {"status": False, "message": "Invalid value: unit cost must be greater than 0"}
+
     if data.name: plan.name = data.name
     if data.price is not None: plan.price = data.price
     if data.credits_offered is not None: plan.credits_offered = data.credits_offered

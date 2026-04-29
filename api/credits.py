@@ -288,21 +288,29 @@ async def initiate_payment(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # 2. Setup Order Data
+    # 2. Fetch official Plan details (Security & Consistency FIX)
+    plan = db.query(Plan).filter(Plan.name == request.plan_name).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail=f"Plan '{request.plan_name}' not found")
+        
+    actual_price = float(plan.price)
+    actual_credits = float(plan.credits_offered)
+
+    # 3. Setup Order Data
     txnid = f"OD-{uuid.uuid4().hex[:12].upper()}"
     
-    # Calculate amount with GST (18%) to match frontend rounding
+    # Calculate amount with GST (18%) using VERIFIED price from DB
     gst_rate = 0.18
-    gst_amount = round(float(request.price) * gst_rate)
-    raw_amount = float(request.price) + gst_amount
+    gst_amount = round(actual_price * gst_rate)
+    raw_amount = actual_price + gst_amount
     
-    # 3. Create Order via Razorpay
+    # 4. Create Order via Razorpay
     payment_service = PaymentService()
     notes = {
         "user_id": str(user_id),
         "user_type": user_type,
-        "plan_name": request.plan_name,
-        "credits": str(request.credits),
+        "plan_name": plan.name,
+        "credits": str(actual_credits),
         "txnid": txnid
     }
     
@@ -313,14 +321,14 @@ async def initiate_payment(
     
     if result.get("success"):
         razor_order = result["order"]
-        # 4. Create Payment Order in DB
+        # 5. Create Payment Order in DB using VERIFIED values
         new_order = PaymentOrder(
             txnid=txnid,
             razorpay_order_id=razor_order["id"],
             user_id=user_id,
             user_type=user_type,
-            plan_name=request.plan_name,
-            credits=request.credits,
+            plan_name=plan.name,
+            credits=actual_credits,
             amount=raw_amount,
             status="pending",
             allocated_to_user_id=str(request.allocated_to_user_id) if request.allocated_to_user_id else None,
