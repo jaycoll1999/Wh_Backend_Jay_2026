@@ -291,9 +291,10 @@ async def initiate_payment(
     # 2. Setup Order Data
     txnid = f"OD-{uuid.uuid4().hex[:12].upper()}"
     
-    # Calculate amount with GST (18%)
+    # Calculate amount with GST (18%) to match frontend rounding
     gst_rate = 0.18
-    raw_amount = float(request.price) * (1 + gst_rate)
+    gst_amount = round(float(request.price) * gst_rate)
+    raw_amount = float(request.price) + gst_amount
     
     # 3. Create Order via Razorpay
     payment_service = PaymentService()

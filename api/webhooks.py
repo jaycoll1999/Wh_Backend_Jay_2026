@@ -342,11 +342,11 @@ async def connection_update(
 
             return {"status": "success", "event": "connected"}
 
-        if status in ["close", "disconnected"]:
-            device.session_status = "disconnected"
+        if status in ["close", "disconnected", "logged_out"]:
+            device.session_status = "logged_out" if status == "logged_out" else "disconnected"
             device.disconnected_at = datetime.now(timezone.utc)
             db.commit()
-            return {"status": "success", "event": "disconnected"}
+            return {"status": "success", "event": status}
 
         return {"status": "ignored"}
 
