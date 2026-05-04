@@ -1,9 +1,14 @@
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status, Header
+from fastapi import APIRouter, Depends, HTTPException, status, Header, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from db.session import get_db
 from models.reseller import Reseller
-from schemas.auth_schema import ChangePasswordRequest, ChangePasswordResponse, RefreshTokenRequest, TokenRefreshResponse
+from schemas.auth_schema import (
+    ChangePasswordRequest, ChangePasswordResponse, 
+    RefreshTokenRequest, TokenRefreshResponse,
+    AdminLoginRequest, AdminLoginResponse
+)
 from core.security import verify_token, verify_password, get_password_hash, create_access_token
 from services.reseller_service import ResellerService
 from services.email_service import email_service
@@ -83,6 +88,50 @@ async def get_current_user(
     # Attach role to the user object for convenience in endpoints
     user.role_in_token = role
     return user
+
+@router.post("/admin-login", response_model=AdminLoginResponse)
+async def admin_login(
+    login_data: AdminLoginRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Robust Admin Login API with custom error handling.
+    """
+    # 1. Validate Request Input
+    if not login_data.email or not login_data.password:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"message": "Email and password are required"}
+        )
+    
+    # 2. Check User in Database
+    admin = db.query(MasterAdmin).filter(MasterAdmin.email == login_data.email).first()
+    if not admin:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"message": "User not registered"}
+        )
+    
+    # 3. Password Verification
+    if not verify_password(login_data.password, admin.password_hash):
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"message": "Invalid credentials"}
+        )
+    
+    # 4. Successful Authentication
+    access_token = create_access_token(
+        data={"sub": str(admin.admin_id), "email": admin.email, "role": "admin"}
+    )
+    
+    return {
+        "message": "Login successful",
+        "token": access_token,
+        "user": {
+            "id": str(admin.admin_id),
+            "email": admin.email
+        }
+    }
 
 @router.get("/me")
 async def get_me(current_user: Any = Depends(get_current_user)):

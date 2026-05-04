@@ -1,3 +1,4 @@
+from typing import Optional
 from pydantic import BaseModel, Field
 
 class ChangePasswordRequest(BaseModel):
@@ -14,3 +15,16 @@ class RefreshTokenRequest(BaseModel):
 class TokenRefreshResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+class AdminLoginRequest(BaseModel):
+    email: Optional[str] = None
+    password: Optional[str] = None
+
+class AdminUserResponse(BaseModel):
+    id: str
+    email: str
+
+class AdminLoginResponse(BaseModel):
+    message: str
+    token: str
+    user: AdminUserResponse

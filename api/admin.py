@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional, Any
 import shutil
@@ -11,6 +12,7 @@ from models.plan import Plan
 from core.security import verify_password, create_access_token, create_refresh_token, get_password_hash
 from api.auth import get_current_user
 from pydantic import BaseModel, EmailStr
+from schemas.auth_schema import AdminLoginRequest
 import uuid
 from uuid import uuid4
 from datetime import datetime, timedelta, timezone
@@ -31,9 +33,7 @@ from models.whatsapp_messages import WhatsAppMessages
 router = APIRouter(tags=["Admin"])
 
 # --- Schemas ---
-class AdminLoginRequest(BaseModel):
-    email: EmailStr
-    password: str
+# AdminLoginRequest is imported from schemas.auth_schema
 
 class PlanCreateRequest(BaseModel):
     name: str
@@ -90,23 +90,47 @@ class UserUpdateRequest(BaseModel):
 
 @router.post("/login")
 async def admin_login(login_data: AdminLoginRequest, db: Session = Depends(get_db)):
+    """
+    Standard admin login endpoint.
+    """
+    # 1. Validate Request Input
+    if not login_data.email or not login_data.password:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"message": "Email and password are required"}
+        )
+    
+    # 2. Check User in Database
     admin = db.query(MasterAdmin).filter(MasterAdmin.email == login_data.email).first()
-    if not admin or not verify_password(login_data.password, admin.password_hash):
-        # Fallback to username check if email doesn't match
+    if not admin:
+        # Fallback to username check
         admin = db.query(MasterAdmin).filter(MasterAdmin.username == login_data.email).first()
-        if not admin or not verify_password(login_data.password, admin.password_hash):
-            raise HTTPException(status_code=401, detail="Invalid admin credentials")
+        if not admin:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"message": "User not registered"}
+            )
     
-    access_token = create_access_token(data={"sub": str(admin.admin_id), "role": "admin", "email": admin.email})
-    refresh_token = create_refresh_token(data={"sub": str(admin.admin_id), "role": "admin", "email": admin.email})
+    # 3. Password Verification
+    if not verify_password(login_data.password, admin.password_hash):
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"message": "Invalid credentials"}
+        )
     
+    # 4. Successful Authentication
+    access_token = create_access_token(
+        data={"sub": str(admin.admin_id), "role": "admin", "email": admin.email}
+    )
+    
+    # The requested response format
     return {
-        "access_token": access_token, 
-        "refresh_token": refresh_token,
-        "token_type": "bearer", 
-        "role": "admin",
-        "email": admin.email,
-        "name": admin.name or admin.username
+        "message": "Login successful",
+        "token": access_token,
+        "user": {
+            "id": str(admin.admin_id),
+            "email": admin.email
+        }
     }
 
 @router.post("/logout")
