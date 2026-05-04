@@ -3,7 +3,7 @@ from .base import Base
 
 # Import core models first (needed for foreign keys)
 from .reseller import Reseller
-from .admin import MasterAdmin
+from .admin import MasterAdmin, Dictionary
 from .plan import Plan
 from .busi_user import BusiUser
 from .device import Device
@@ -43,4 +43,4 @@ from .contact_group import ContactGroup, Contact
 # Import PasswordResetToken
 from .password_reset_token import PasswordResetToken
 
-__all__ = ["Base", "Reseller", "MasterAdmin", "Plan", "BusiUser", "Device", "CreditDistribution", "Message", "DeviceSession", "MessageUsageCreditLog", "ResellerAnalytics", "BusinessUserAnalytics", "OfficialWhatsAppConfig", "WhatsAppTemplate", "WhatsAppWebhookLog", "GoogleSheet", "GoogleSheetTrigger", "GoogleSheetTriggerHistory", "WhatsAppInbox", "QuickReply", "WhatsAppMessages", "Campaign", "CampaignDevice", "MessageTemplate", "MessageLog", "AuditLog", "PaymentOrder", "ContactGroup", "Contact", "PasswordResetToken"]
+__all__ = ["Base", "Reseller", "MasterAdmin", "Dictionary", "Plan", "BusiUser", "Device", "CreditDistribution", "Message", "DeviceSession", "MessageUsageCreditLog", "ResellerAnalytics", "BusinessUserAnalytics", "OfficialWhatsAppConfig", "WhatsAppTemplate", "WhatsAppWebhookLog", "GoogleSheet", "GoogleSheetTrigger", "GoogleSheetTriggerHistory", "WhatsAppInbox", "QuickReply", "WhatsAppMessages", "Campaign", "CampaignDevice", "MessageTemplate", "MessageLog", "AuditLog", "PaymentOrder", "ContactGroup", "Contact", "PasswordResetToken"]

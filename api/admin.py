@@ -9,7 +9,7 @@ from models.admin import MasterAdmin
 from models.reseller import Reseller
 from models.busi_user import BusiUser
 from models.plan import Plan
-from core.security import verify_password, create_access_token, create_refresh_token, get_password_hash
+from core.security import verify_password, create_access_token, create_refresh_token, get_password_hash, get_current_admin
 from api.auth import get_current_user
 from pydantic import BaseModel, EmailStr
 from schemas.auth_schema import AdminLoginRequest
@@ -85,6 +85,16 @@ class UserUpdateRequest(BaseModel):
     business_name: Optional[str] = None
     plan_id: Optional[str] = None
     credits_allocated: Optional[float] = None
+
+class DictionaryCreateRequest(BaseModel):
+    entity_id: str
+    entity_type: str
+    key: str
+    value: str
+
+class DictionaryUpdateRequest(BaseModel):
+    key: Optional[str] = None
+    value: Optional[str] = None
 
 # --- Logic ---
 
@@ -586,11 +596,15 @@ async def list_all_platform_users(
         is_expired = plan_expiry < now if plan_expiry else True
         has_credits = (b.credits_remaining or 0) > 0
         
+        p_role = (b.parent_role or "").strip().lower()
+        entity_type = "user" if p_role == "admin" else "subuser"
+        
         final_results.append({
             "id": str(b.busi_user_id),
             "name": b.name,
             "email": b.email,
-            "role": "Direct Business" if (b.parent_role or "").strip().lower() == "admin" else "Managed User",
+            "role": "Direct Business" if p_role == "admin" else "Managed User",
+            "type": entity_type,
             "status": "active" if (has_credits and not is_expired) else "inactive",
             "joined": b.created_at.strftime("%Y-%m-%d") if b.created_at else "Unknown",
             "company": b.business_name or "Independent",
@@ -604,6 +618,7 @@ async def list_all_platform_users(
             "name": r.name,
             "email": r.email,
             "role": "Reseller",
+            "type": "reseller",
             "status": "active" if r.available_credits > 0 else "inactive",
             "joined": r.created_at.strftime("%Y-%m-%d") if r.created_at else "Unknown",
             "company": r.business_name or "Independent Agency",
@@ -614,6 +629,71 @@ async def list_all_platform_users(
     final_results.sort(key=lambda x: x["joined"], reverse=True)
     return final_results
 
+
+# --- Dictionary API ---
+
+@router.get("/dictionary")
+async def get_dictionary(
+    entity_id: str,
+    db: Session = Depends(get_db),
+    current_admin: MasterAdmin = Depends(get_current_admin)
+):
+    """Fetch dictionary entries for a specific entity"""
+    entries = db.query(Dictionary).filter(Dictionary.entity_id == entity_id).all()
+    return entries
+
+@router.post("/dictionary")
+async def add_dictionary_entry(
+    data: DictionaryCreateRequest,
+    db: Session = Depends(get_db),
+    current_admin: MasterAdmin = Depends(get_current_admin)
+):
+    """Add a new dictionary entry for an entity"""
+    new_entry = Dictionary(
+        entity_id=data.entity_id,
+        entity_type=data.entity_type,
+        key=data.key,
+        value=data.value
+    )
+    db.add(new_entry)
+    db.commit()
+    db.refresh(new_entry)
+    return new_entry
+
+@router.put("/dictionary/{id}")
+async def update_dictionary_entry(
+    id: str,
+    data: DictionaryUpdateRequest,
+    db: Session = Depends(get_db),
+    current_admin: MasterAdmin = Depends(get_current_admin)
+):
+    """Update an existing dictionary entry"""
+    entry = db.query(Dictionary).filter(Dictionary.id == id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    
+    if data.key: entry.key = data.key
+    if data.value: entry.value = data.value
+    
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+@router.delete("/dictionary/{id}")
+async def delete_dictionary_entry(
+    id: str,
+    db: Session = Depends(get_db),
+    current_admin: MasterAdmin = Depends(get_current_admin)
+):
+    """Delete a dictionary entry"""
+    entry = db.query(Dictionary).filter(Dictionary.id == id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    
+    db.delete(entry)
+    db.commit()
+    return {"message": "Entry deleted successfully"}
+
 @router.get("/users/{user_id}")
 async def get_platform_user_details(
     user_id: str, 
@@ -623,16 +703,21 @@ async def get_platform_user_details(
     """ 🔥 [ADMIN] Fetch comprehensive details for any platform user (Business or Reseller) """
     if not isinstance(current_admin, MasterAdmin):
         raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    # Fetch dictionary entries
+    dictionary = db.query(Dictionary).filter(Dictionary.entity_id == str(user_id)).all()
+    
     # 1. Try BusiUser
     b_user = db.query(BusiUser).filter(BusiUser.busi_user_id == str(user_id)).first()
     if b_user:
         return {
             "id": str(b_user.busi_user_id),
             "role": "Direct Business" if b_user.parent_role == "admin" else "Managed User",
+            "type": "user" if b_user.parent_role == "admin" else "subuser",
             "status": "active" if b_user.credits_remaining > 0 else "inactive",
             "whatsapp_mode": b_user.whatsapp_mode,
             "plan_name": b_user.plan_name,
             "plan_expiry": b_user.plan_expiry.isoformat() if b_user.plan_expiry else None,
+            "dictionary": dictionary,
             "profile": {
                 "name": b_user.name,
                 "email": b_user.email,
@@ -664,10 +749,12 @@ async def get_platform_user_details(
         return {
             "id": str(r_user.reseller_id),
             "role": "Reseller",
+            "type": "reseller",
             "status": "active" if r_user.available_credits > 0 else "inactive",
             "whatsapp_mode": "reseller_portal",
             "plan_name": r_user.plan_name,
             "plan_expiry": r_user.plan_expiry.isoformat() if r_user.plan_expiry else None,
+            "dictionary": dictionary,
             "profile": {
                 "name": r_user.name,
                 "email": r_user.email,

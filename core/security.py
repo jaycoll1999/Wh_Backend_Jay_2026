@@ -64,16 +64,10 @@ def verify_token(token: str) -> dict:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
     except jwt.ExpiredSignatureError:
-        # Specific handling for expired tokens
-        print(f"DEBUG: JWT Error: Token has expired")
-        return {"error": "token_expired", "message": "Token has expired"}
-    except jwt.JWTError as e:
-        # Other JWT errors (invalid signature, etc.)
-        print(f"DEBUG: JWT Error: {str(e)}")
-        return {"error": "invalid_token", "message": "Invalid token"}
-    except Exception as e:
-        # Fallback for any other JWT errors
-        print(f"DEBUG: JWT Error: {str(e)}")
+        return {"error": "token_expired", "message": "Session expired"}
+    except jwt.JWTError:
+        return {"error": "invalid_token", "message": "Unauthorized"}
+    except Exception:
         return {"error": "jwt_error", "message": "Token validation failed"}
 
 
@@ -82,29 +76,44 @@ def get_current_user_id(authorization: str = Header(None)) -> str:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Bearer token required",
+            detail="Unauthorized",
             headers={"WWW-Authenticate": "Bearer"},
         )
     
     token = authorization.split(" ")[1]
-    
     payload = verify_token(token)
     
-    if payload.get("error"):
-        error_type = payload.get("error", "invalid_token") if payload else "invalid_token"
-        error_message = payload.get("message", "Invalid or expired token") if payload else "Invalid or expired token"
-        
-        if error_type == "token_expired":
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=error_message,
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=error_message,
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+    if "error" in payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=payload["message"],
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     
     return payload.get("sub")
+
+
+async def get_current_admin(authorization: str = Header(None)) -> dict:
+    """Dependency to verify admin role and session."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized",
+        )
+    
+    token = authorization.split(" ")[1]
+    payload = verify_token(token)
+    
+    if "error" in payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=payload["message"],
+        )
+    
+    if payload.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required",
+        )
+    
+    return payload

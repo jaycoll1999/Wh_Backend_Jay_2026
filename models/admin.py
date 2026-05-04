@@ -22,3 +22,18 @@ class MasterAdmin(Base):
 
     def __repr__(self):
         return f"<MasterAdmin(admin_id={self.admin_id}, username={self.username})>"
+
+
+class Dictionary(Base):
+    __tablename__ = "entity_dictionaries"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    entity_id = Column(String(36), nullable=False, index=True)
+    entity_type = Column(String(50), nullable=False, index=True) # 'user', 'reseller', 'subuser'
+    key = Column(String(255), nullable=False)
+    value = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    def __repr__(self):
+        return f"<Dictionary(entity_id={self.entity_id}, key={self.key})>"
