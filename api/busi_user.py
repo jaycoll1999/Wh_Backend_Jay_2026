@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Header
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional, Any
 import uuid
@@ -289,7 +290,16 @@ async def login_busi_user(
     login_data: BusiUserLoginSchema,
     busi_user_service: BusiUserService = Depends(get_busi_user_service)
 ):
-    """Authenticate busi_user and return access token."""
+    # 1. Check for existence first
+    email = login_data.email.lower().strip()
+    user_exists = busi_user_service.get_business_by_email(email)
+    if not user_exists:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"message": "User not registered"}
+        )
+
+    # 2. Authenticate
     busi_user = busi_user_service.authenticate_busi_user(login_data.email, login_data.password)
     if not busi_user:
         raise HTTPException(

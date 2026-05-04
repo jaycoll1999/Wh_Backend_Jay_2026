@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Header
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from db.session import get_db
@@ -88,9 +89,9 @@ async def login_reseller(login_data: ResellerLoginSchema, db: Session = Depends(
     reseller = reseller_service.get_reseller_by_email(email)
     
     if not reseller:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password"  # Uniform error message
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"message": "User not registered"}
         )
     
     # Robust Password Verification
