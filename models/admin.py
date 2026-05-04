@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, UUID as SQL_UUID
+from sqlalchemy import Column, String, DateTime, Text, UUID as SQL_UUID
 from sqlalchemy.sql import func
 import uuid
 from db.base import Base

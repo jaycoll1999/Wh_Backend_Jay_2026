@@ -1245,7 +1245,9 @@ async def list_all_orders(
             "allocated_to_name": allocated_name,
             "is_allocated": o.is_allocated or "pending",
             "created_at": o.created_at.isoformat() if o.created_at else None,
-            "razorpay_payment_id": o.razorpay_payment_id
+            "razorpay_order_id": o.razorpay_order_id,
+            "razorpay_payment_id": o.razorpay_payment_id,
+            "razorpay_signature": o.razorpay_signature
         })
         
     return results
