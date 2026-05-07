@@ -1,20 +1,33 @@
-from sqlalchemy import create_engine, inspect
+import sys
 import os
 
-# Using the URL from core/config.py
-DATABASE_URL = "postgresql://whatsapp_platform_mhnw_user:nComdm17QkuwCzuxi2sMjZrIbXXLV8FG@dpg-d7cbd05ckfvc7387lfog-a.oregon-postgres.render.com/whatsapp_platform_mhnw"
+# Add the project root to sys.path
+sys.path.append(os.getcwd())
 
-engine = create_engine(DATABASE_URL)
-inspector = inspect(engine)
+from db.session import SessionLocal
+from sqlalchemy import text
 
-tables = ["businesses", "resellers", "master_admins", "devices", "plans", "campaigns"]
-
-for table in tables:
-    print(f"\nTable: {table}")
+def check_schema():
+    db = SessionLocal()
     try:
-        columns = inspector.get_columns(table)
-        for column in columns:
-            if "id" in column['name'].lower():
-                print(f"  {column['name']}: {column['type']}")
+        # Check columns of devices table
+        result = db.execute(text("SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = 'devices'"))
+        columns = result.fetchall()
+        print("Columns in 'devices' table:")
+        for col in columns:
+            print(f" - {col[0]} ({col[1]}), Nullable: {col[2]}")
+        
+        # Check if any unique constraints
+        result = db.execute(text("SELECT conname FROM pg_constraint WHERE conrelid = 'devices'::regclass AND contype = 'u'"))
+        constraints = result.fetchall()
+        print("\nUnique constraints on 'devices' table:")
+        for con in constraints:
+            print(f" - {con[0]}")
+            
     except Exception as e:
-        print(f"  Error inspecting table: {e}")
+        print(f"Error checking schema: {e}")
+    finally:
+        db.close()
+
+if __name__ == "__main__":
+    check_schema()
