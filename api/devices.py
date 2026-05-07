@@ -38,36 +38,73 @@ async def register_device(
 ):
     """Register a new device for the authenticated user"""
     try:
-        user_id = str(token_payload.get("sub"))
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid token")
+        # ✅ 2. Add Safe Debugging (temporary)
+        body = {}
+        try:
+            body = await request.json()
+            logger.info(f"📥 Incoming device registration: {body}")
+            # print(body) # As requested for debugging
+        except Exception as json_err:
+            logger.error(f"❌ Failed to parse request JSON: {json_err}")
+            raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-        # Parse request body manually to handle frontend format
-        body = await request.json()
+        # ✅ 4. Fix User Context Handling
+        user_id = token_payload.get("sub")
+        if not user_id:
+            logger.error("❌ User ID missing in token payload")
+            raise HTTPException(status_code=401, detail="Authentication failed: User identity missing")
+        
+        user_id = str(user_id)
+
+        # ✅ 3. Validate Input Properly
         device_name = body.get("device_name")
-        device_type = body.get("device_type", "web")
+        device_type = body.get("device_type")
         
-        if not device_name:
-            raise HTTPException(status_code=400, detail="device_name is required")
+        # Reject empty or missing values
+        if not device_name or not str(device_name).strip():
+            raise HTTPException(status_code=400, detail="device_name is required and cannot be empty")
         
-        # Create device register request
-        device_request = DeviceRegisterRequest(
-            user_id=str(user_id),
-            device_name=device_name,
-            device_type=DeviceType(device_type.lower())
-        )
-        
-        # Register device using the service
-        device = device_service.register_device(str(user_id), device_request)
-        return device
+        if not device_type or not str(device_type).strip():
+            raise HTTPException(status_code=400, detail="device_type is required and cannot be empty")
+
+        # ✅ 5. Fix DB Insert Logic & handle duplicate names
+        try:
+            from schemas.device import DeviceType, DeviceRegisterRequest
+            
+            # Safe Enum Conversion
+            try:
+                final_device_type = DeviceType(str(device_type).lower().strip())
+            except ValueError:
+                valid_types = [e.value for e in DeviceType]
+                raise HTTPException(status_code=400, detail=f"Invalid device_type. Must be one of: {valid_types}")
+            
+            # Create device register request
+            device_request = DeviceRegisterRequest(
+                user_id=user_id,
+                device_name=str(device_name).strip(),
+                device_type=final_device_type
+            )
+            
+            # Register device using the service
+            device = device_service.register_device(user_id, device_request)
+            return device
+
+        except ValueError as val_err:
+            # Handle business logic errors (like duplicate names or limits) from the service
+            logger.warning(f"⚠️ Registration validation error: {val_err}")
+            raise HTTPException(status_code=400, detail=str(val_err))
+        except Exception as db_err:
+            logger.error(f"❌ Database error during device registration: {db_err}")
+            raise HTTPException(
+                status_code=500, 
+                detail="A database error occurred while registering the device. Please ensure the name is unique."
+            )
+
     except HTTPException:
         raise
-    except ValueError as e:
-        logger.error(f"Validation error registering device: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Error registering device: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to register device: {str(e)}")
+        logger.error(f"🔥 Critical error in register_device: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 @router.get("/", response_model=List[DeviceModelResponse])
 async def get_devices(

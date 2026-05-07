@@ -25,13 +25,28 @@ async def get_my_plan(
     # 1. Handle Business Users
     if isinstance(current_user, BusiUser):
         # Fetch assigner name
-        assigned_by_name = "Administrator"
-        assigned_by_role = "admin"
+        # [NEW] Reseller/Admin details for contact
+        reseller_contact = None
         if current_user.parent_reseller_id:
             reseller = db.query(Reseller).filter(Reseller.reseller_id == current_user.parent_reseller_id).first()
             if reseller:
                 assigned_by_name = reseller.name
                 assigned_by_role = "reseller"
+                reseller_contact = {
+                    "name": reseller.name,
+                    "phone": reseller.phone,
+                    "email": reseller.email
+                }
+        elif current_user.parent_admin_id:
+            admin = db.query(MasterAdmin).filter(MasterAdmin.admin_id == current_user.parent_admin_id).first()
+            if admin:
+                assigned_by_name = admin.name or admin.username
+                assigned_by_role = "admin"
+                reseller_contact = {
+                    "name": assigned_by_name,
+                    "phone": admin.phone,
+                    "email": admin.email
+                }
 
         # Auto-heal missing plan relationship
         user_plan = current_user.plan
@@ -54,7 +69,8 @@ async def get_my_plan(
             "assigned_by_name": assigned_by_name,
             "assigned_by_role": assigned_by_role,
             "is_active": True if user_plan else False,
-            "plan": PlanResponseSchema.model_validate(user_plan).model_dump() if user_plan else None
+            "plan": PlanResponseSchema.model_validate(user_plan).model_dump() if user_plan else None,
+            "reseller": reseller_contact # 🔥 Added reseller contact details
         }
     
     # 2. Handle Resellers
