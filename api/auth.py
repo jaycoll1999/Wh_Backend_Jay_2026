@@ -63,7 +63,7 @@ async def get_current_user(
         )
     
     user_id = payload.get("sub")
-    role = payload.get("role", "business_owner") # Default to business_owner if role not specified
+    role = (payload.get("role") or "").lower()
     
     if not user_id:
         raise HTTPException(
@@ -73,12 +73,26 @@ async def get_current_user(
         
     user = None
     try:
-        if role == "admin":
+        # 1. Try Admin tables if role matches admin keywords
+        if role in ["admin", "super_admin"]:
             user = db.query(MasterAdmin).filter(MasterAdmin.admin_id == str(user_id)).first()
-        elif role == "reseller":
+        
+        # 2. Try Reseller table if role matches reseller keywords
+        if not user and role in ["reseller"]:
             user = db.query(Reseller).filter(Reseller.reseller_id == str(user_id)).first()
-        else: # Default to BusiUser
+            
+        # 3. Fallback: Search across all tables if role is ambiguous (business_owner, user, empty, etc.)
+        if not user:
+            # Most common case: Business User
             user = db.query(BusiUser).filter(BusiUser.busi_user_id == str(user_id)).first()
+            
+            # If still not found, try Reseller (some older tokens might lack role or use non-standard ones)
+            if not user:
+                user = db.query(Reseller).filter(Reseller.reseller_id == str(user_id)).first()
+            
+            # Final fallback to Admin
+            if not user:
+                user = db.query(MasterAdmin).filter(MasterAdmin.admin_id == str(user_id)).first()
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid ID format in token: {str(e)}")
         
@@ -137,27 +151,48 @@ async def admin_login(
 async def get_me(current_user: Any = Depends(get_current_user)):
     """
     Unified endpoint to get current user details across all roles.
+    Returns a consistent structure for frontend consumption.
     """
     if isinstance(current_user, MasterAdmin):
         return {
             "id": str(current_user.admin_id),
             "email": current_user.email,
             "name": current_user.name or current_user.username,
-            "role": "admin"
+            "username": current_user.username,
+            "role": "admin",
+            "business_name": current_user.business_name or "System Admin",
+            "phone": current_user.phone
         }
     elif isinstance(current_user, Reseller):
         return {
             "id": str(current_user.reseller_id),
             "email": current_user.email,
             "name": current_user.name,
-            "role": "reseller"
+            "username": current_user.username,
+            "role": "reseller",
+            "business_name": current_user.business_name,
+            "phone": current_user.phone,
+            "credits": {
+                "total": current_user.total_credits,
+                "available": current_user.available_credits,
+                "used": current_user.used_credits
+            }
         }
     else: # BusiUser
         return {
             "id": str(current_user.busi_user_id),
             "email": current_user.email,
             "name": current_user.name,
-            "role": current_user.role or "user"
+            "username": current_user.username,
+            "role": current_user.role or "user",
+            "business_name": current_user.business_name,
+            "phone": current_user.phone,
+            "credits": {
+                "allocated": current_user.credits_allocated,
+                "used": current_user.credits_used,
+                "remaining": current_user.credits_remaining
+            },
+            "whatsapp_mode": current_user.whatsapp_mode
         }
 
 @router.post("/change-password", response_model=ChangePasswordResponse)

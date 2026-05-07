@@ -5,7 +5,7 @@ from typing import List, Optional, Any
 import shutil
 import re
 from db.session import get_db
-from models.admin import MasterAdmin
+from models.admin import MasterAdmin, Dictionary
 from models.reseller import Reseller
 from models.busi_user import BusiUser
 from models.plan import Plan

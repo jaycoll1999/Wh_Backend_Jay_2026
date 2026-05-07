@@ -115,7 +115,7 @@ async def create_whatsapp_config(
                 # Create fresh official device
                 from schemas.device import DeviceCreate
                 device_data = DeviceCreate(
-                    device_id=uuid.uuid4(),
+                    device_id=str(uuid.uuid4()),
                     busi_user_id=busi_user_id,
                     device_name="Official WhatsApp Cloud",
                     device_type=DeviceType.official,

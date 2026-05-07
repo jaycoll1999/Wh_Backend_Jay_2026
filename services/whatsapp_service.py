@@ -93,7 +93,7 @@ class WhatsAppService:
             # ✅ Convert string to UUID before querying
             device_uuid = UUIDService.safe_convert(device_id)
             device = self.db.query(Device).filter(
-                Device.device_id == device_uuid,
+                Device.device_id == str(device_uuid),
                 Device.busi_user_id == user_id
             ).first()
             
@@ -228,7 +228,7 @@ class WhatsAppService:
             # ✅ Convert string to UUID before querying
             device_uuid = UUIDService.safe_convert(device_id)
             device = self.db.query(Device).filter(
-                Device.device_id == device_uuid,
+                Device.device_id == str(device_uuid),
                 Device.busi_user_id == user_id
             ).first()
             if device:
@@ -419,7 +419,7 @@ class WhatsAppService:
             
             if device_id:
                 # Use specific device if provided
-                found_device = self.db.query(Device).filter(Device.device_id == device_id).first()
+                found_device = self.db.query(Device).filter(Device.device_id == str(device_id)).first()
                 if not found_device:
                     raise Exception(f"Device {device_id} not found in database")
                 

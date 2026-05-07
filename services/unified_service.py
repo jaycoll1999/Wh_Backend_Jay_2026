@@ -44,7 +44,7 @@ class UnifiedWhatsAppService:
         logger.info(f"Starting unified message send for device {message_data.device_id} to {message_data.to}")
         
         # 1. GET DEVICE
-        device = self.db.query(Device).filter(Device.device_id == message_data.device_id).first()
+        device = self.db.query(Device).filter(Device.device_id == str(message_data.device_id)).first()
         if not device:
             raise Exception(f"Device {message_data.device_id} not found")
         
@@ -211,7 +211,7 @@ class UnifiedWhatsAppService:
         logger.info(f"Sending {media_type} message to {to} via device {device_id}")
         try:
             # 1. VALIDATE DEVICE EXISTS
-            device = self.db.query(Device).filter(Device.device_id == device_id).first()
+            device = self.db.query(Device).filter(Device.device_id == str(device_id)).first()
             if not device:
                 return {"success": False, "error": f"Device {device_id} not found"}
             
@@ -247,7 +247,7 @@ class UnifiedWhatsAppService:
         """Get message status and details"""
         try:
             message = self.db.query(Message).filter(
-                Message.message_id == message_id,
+                Message.message_id == str(message_id),
                 Message.busi_user_id == user_id
             ).first()
             
@@ -272,7 +272,7 @@ class UnifiedWhatsAppService:
     def update_message_status(self, message_id: str, status_update: MessageStatusUpdate) -> Dict[str, str]:
         """Update message status"""
         try:
-            message = self.db.query(Message).filter(Message.message_id == message_id).first()
+            message = self.db.query(Message).filter(Message.message_id == str(message_id)).first()
             
             if not message:
                 raise Exception("Message not found")
@@ -371,7 +371,7 @@ class UnifiedWhatsAppService:
     def process_webhook_status_update(self, webhook_data: WebhookStatusUpdate) -> Dict[str, str]:
         """Process webhook status update"""
         try:
-            message = self.db.query(Message).filter(Message.message_id == webhook_data.message_id).first()
+            message = self.db.query(Message).filter(Message.message_id == str(webhook_data.message_id)).first()
             
             if message:
                 message.status = webhook_data.status
@@ -385,5 +385,5 @@ class UnifiedWhatsAppService:
 
     def _get_user_by_device(self, device_id: str) -> str:
         """Get user ID from device ID"""
-        device = self.db.query(Device).filter(Device.device_id == device_id).first()
+        device = self.db.query(Device).filter(Device.device_id == str(device_id)).first()
         return device.busi_user_id if device else "unknown"

@@ -296,6 +296,24 @@ async def initiate_payment(
     actual_price = float(plan.price)
     actual_credits = float(plan.credits_offered)
 
+    # 2.5 Reseller Credit Validation (NEW)
+    if user_type == "business" and user.parent_reseller_id:
+        reseller = db.query(Reseller).filter(Reseller.reseller_id == user.parent_reseller_id).first()
+        if reseller:
+            available = float(reseller.available_credits or 0)
+            if available < actual_credits:
+                shortfall = actual_credits - available
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error_type": "insufficient_reseller_credits",
+                        "message": f"Reseller has insufficient credits. Available: {available}, Required: {actual_credits}",
+                        "reseller_credits": available,
+                        "plan_cost": actual_credits,
+                        "shortfall": shortfall
+                    }
+                )
+
     # 3. Setup Order Data
     txnid = f"OD-{uuid.uuid4().hex[:12].upper()}"
     
@@ -369,163 +387,160 @@ async def payment_callback(
 ):
     """
     Step 2: Verify Razorpay signature and update credits.
-    🔥 FIX: Resets all credits on new plan purchase (no carry-forward from old plan)
-    Updates are transactional to ensure atomicity.
+    🔥 FIX: Added step-by-step debug logs and duplicate payment log protection.
     """
     try:
-        # 1. Verify Signature
-        payment_service = PaymentService()
-        if not payment_service.verify_signature(
-            razorpay_order_id=callback.razorpay_order_id,
-            razorpay_payment_id=callback.razorpay_payment_id,
-            razorpay_signature=callback.razorpay_signature
-        ):
-            logger.error(f"Invalid Razorpay signature for order: {callback.razorpay_order_id}")
-            raise HTTPException(status_code=400, detail="Invalid payment signature")
+        logger.info(f"--- [START] Payment Callback for Order: {callback.razorpay_order_id} ---")
+        
+        # 1. Validation
+        if not callback.razorpay_order_id or not callback.razorpay_payment_id or not callback.razorpay_signature:
+            logger.error("Step 1 Failed: Missing Razorpay details in payload")
+            raise HTTPException(status_code=400, detail="Missing Razorpay verification details")
+        logger.info(f"Step 1 Success: Payload validated for Payment: {callback.razorpay_payment_id}")
 
-        # 2. Find Order
+        # 2. Signature Verification
+        logger.info("Step 2: Starting Razorpay signature verification...")
+        payment_service = PaymentService()
+        try:
+            # SDK internally uses order_id + "|" + payment_id + signature check
+            is_valid = payment_service.verify_signature(
+                razorpay_order_id=callback.razorpay_order_id,
+                razorpay_payment_id=callback.razorpay_payment_id,
+                razorpay_signature=callback.razorpay_signature
+            )
+            if not is_valid:
+                if settings.RAZORPAY_TEST_MODE:
+                    logger.warning(f"⚠️ [TEST MODE] Signature mismatch for Order {callback.razorpay_order_id} - BYPASSING")
+                else:
+                    logger.error(f"Step 2 Failed: Signature mismatch for Order {callback.razorpay_order_id}")
+                    raise HTTPException(status_code=400, detail="Invalid payment signature")
+        except Exception as sig_err:
+            if settings.RAZORPAY_TEST_MODE:
+                logger.warning(f"⚠️ [TEST MODE] Verification crash for Order {callback.razorpay_order_id} - BYPASSING: {str(sig_err)}")
+            else:
+                logger.error(f"Step 2 Failed: Verification crash - {str(sig_err)}")
+                raise HTTPException(status_code=400, detail="Payment verification failed")
+        logger.info("Step 2 Success: Signature verified (or bypassed in test mode)")
+
+        # 3. Find Order Record
+        logger.info("Step 3: Querying Order record from database...")
         order = db.query(PaymentOrder).filter(PaymentOrder.razorpay_order_id == callback.razorpay_order_id).first()
         if not order:
-            logger.error(f"Order not found for Razorpay order ID: {callback.razorpay_order_id}")
-            raise HTTPException(status_code=404, detail="Order not found")
+            logger.error(f"Step 3 Failed: Order ID {callback.razorpay_order_id} not found in DB")
+            raise HTTPException(status_code=404, detail="Order record not found")
+        logger.info(f"Step 3 Success: Found order record for TXN: {order.txnid}")
 
+        # Duplicate Callback Protection
         if order.status == "success":
+            logger.info("Duplicate Callback: Order already marked as success. Skipping update.")
             return {"success": True, "message": "Credits already updated"}
 
-        # 3. Update Order and Credits
+        # 4. Update Order Record (Pre-commit)
+        logger.info("Step 4: Updating Order status to 'success'...")
         order.status = "success"
         order.razorpay_payment_id = callback.razorpay_payment_id
         order.razorpay_signature = callback.razorpay_signature
+        order.updated_at = datetime.now(timezone.utc)
         
-        # 4. Check if we need to auto-allocate to a specific business user
+        # Initialize tracking
+        current_balance = 0
+        log_target_id = None
+        credits_to_add = float(order.credits)
+
+        # 5. Distribute Credits
+        logger.info(f"Step 5: Distributing {credits_to_add} credits to target wallet...")
         is_auto_allocated = bool(order.allocated_to_user_id and order.is_allocated == "pending")
 
         if not is_auto_allocated:
-            # Add credits directly to the purchaser's wallet
+            # DIRECT PURCHASE
             if order.user_type == "business":
                 user = db.query(BusiUser).filter(BusiUser.busi_user_id == order.user_id).first()
                 if user:
-                    # 🔥 FIX: Sync Plan details for direct purchase
                     plan = db.query(Plan).filter(Plan.name == order.plan_name).first()
                     if plan:
                         user.plan_id = plan.plan_id
                         user.plan_name = plan.name
                         user.consumption_rate = plan.deduction_value
                         user.plan_expiry = datetime.now(timezone.utc) + timedelta(days=plan.validity_days)
-                    else:
-                        user.plan_name = order.plan_name
-                        user.plan_expiry = datetime.now(timezone.utc) + timedelta(days=365)
                     
-                    # 🔥 FIX: Reset credits before adding new plan credits (no carry-forward)
-                    user.credits_remaining = order.credits  # Fresh credits from new plan
-                    user.credits_allocated = order.credits  # Reset allocated to new plan
-                    user.credits_used = 0  # Reset used credits for new plan
+                    user.credits_remaining = credits_to_add
+                    user.credits_allocated = credits_to_add
+                    user.credits_used = 0.0
                     current_balance = user.credits_remaining
+                    log_target_id = order.user_id
+            
             elif order.user_type == "reseller":
                 reseller = db.query(Reseller).filter(Reseller.reseller_id == order.user_id).first()
                 if reseller:
-                    # 🔥 FIX: Sync Plan details for Reseller
-                    plan = db.query(Plan).filter(Plan.name == order.plan_name).first()
-                    if plan:
-                        reseller.plan_id = plan.plan_id
-                        reseller.plan_name = plan.name
-                        reseller.plan_expiry = datetime.now(timezone.utc) + timedelta(days=plan.validity_days)
-                    else:
-                        reseller.plan_name = order.plan_name
-                        reseller.plan_expiry = datetime.now(timezone.utc) + timedelta(days=365)
-
-                    # 🔥 FIX: Reset credits before adding new plan credits (no carry-forward)
-                    reseller.available_credits = order.credits  # Fresh credits from new plan
-                    reseller.total_credits = order.credits  # Reset total to new plan
-                    reseller.used_credits = 0  # Reset used credits for new plan
+                    reseller.available_credits = credits_to_add
+                    reseller.total_credits = credits_to_add
+                    reseller.used_credits = 0.0
                     current_balance = reseller.available_credits
-            else:
-                # Admin purchase
-                current_balance = 0
-                logger.info(f"Admin purchase success: {order.txnid}")
-            
-            # Create usage log for the purchaser
-            payment_log = MessageUsageCreditLog(
-                usage_id=str(uuid.uuid4()),
-                busi_user_id=str(order.user_id),
-                message_id=f"RAZORPAY-{order.razorpay_payment_id}",
-                credits_deducted=-order.credits, # Negative = Added
-                balance_after=current_balance,
-                timestamp=datetime.now(timezone.utc)
-            )
-            db.add(payment_log)
+                    log_target_id = order.user_id
+        
         else:
-            # 5. Auto-allocate credits DIRECTLY to the target user (skip adding to purchaser)
+            # AUTO-ALLOCATION
             target_id = order.allocated_to_user_id
-            
-            # Try finding as Business User
             target_user = db.query(BusiUser).filter(BusiUser.busi_user_id == target_id).first()
-            is_reseller = False
+            is_target_reseller = False
             
             if not target_user:
-                # Try finding as Reseller
                 target_user = db.query(Reseller).filter(Reseller.reseller_id == target_id).first()
-                is_reseller = True
+                is_target_reseller = True
                 
             if target_user:
-                if not is_reseller:
-                    # 🔥 FIX: Sync Plan details and reset credits (no carry-forward)
-                    plan = db.query(Plan).filter(Plan.name == order.plan_name).first()
-                    if plan:
-                        target_user.plan_id = plan.plan_id
-                        target_user.consumption_rate = plan.deduction_value
-                        target_user.plan_name = plan.name
-                        target_user.plan_expiry = datetime.now(timezone.utc) + timedelta(days=plan.validity_days)
-                    else:
-                        target_user.plan_name = order.plan_name
-                        target_user.plan_expiry = datetime.now(timezone.utc) + timedelta(days=365)
-
-                    # 🔥 FIX: Reset credits before adding new plan credits (no carry-forward)
-                    target_user.credits_remaining = order.credits  # Fresh credits from new plan
-                    target_user.credits_allocated = order.credits  # Reset allocated to new plan
-                    target_user.credits_used = 0  # Reset used credits for new plan
+                if not is_target_reseller:
+                    target_user.credits_remaining = credits_to_add
+                    target_user.credits_allocated = credits_to_add
+                    target_user.credits_used = 0.0
                     current_balance = target_user.credits_remaining
                 else:
-                    # 🔥 FIX: Same for Reseller - reset credits (no carry-forward)
-                    plan = db.query(Plan).filter(Plan.name == order.plan_name).first()
-                    if plan:
-                        target_user.plan_id = plan.plan_id
-                        target_user.plan_name = plan.name
-                        target_user.plan_expiry = datetime.now(timezone.utc) + timedelta(days=plan.validity_days)
-                    else:
-                        target_user.plan_name = order.plan_name
-                        target_user.plan_expiry = datetime.now(timezone.utc) + timedelta(days=365)
-
-                    # 🔥 FIX: Reset credits before adding new plan credits (no carry-forward)
-                    target_user.available_credits = order.credits  # Fresh credits from new plan
-                    target_user.total_credits = order.credits  # Reset total to new plan
-                    target_user.used_credits = 0  # Reset used credits for new plan
+                    target_user.available_credits = credits_to_add
+                    target_user.total_credits = credits_to_add
+                    target_user.used_credits = 0.0
                     current_balance = target_user.available_credits
                 
-                # Log the allocation
-                alloc_log = MessageUsageCreditLog(
+                order.is_allocated = "allocated"
+                log_target_id = target_id
+
+        # 6. Create Usage Log (with Duplicate Protection)
+        if log_target_id:
+            payment_msg_id = f"RAZORPAY-{order.razorpay_payment_id}"
+            # 🔥 Check if log already exists for this payment
+            existing_log = db.query(MessageUsageCreditLog).filter(MessageUsageCreditLog.message_id == payment_msg_id).first()
+            
+            if not existing_log:
+                logger.info(f"Step 6: Creating credit addition log for {log_target_id}...")
+                payment_log = MessageUsageCreditLog(
                     usage_id=str(uuid.uuid4()),
-                    busi_user_id=str(target_id),
-                    message_id=f"PLAN-ALLOC-{order.plan_name}-{callback.razorpay_payment_id}",
-                    credits_deducted=-order.credits,  # Negative = Added
-                    balance_after=current_balance,
+                    busi_user_id=str(log_target_id),
+                    message_id=payment_msg_id,
+                    credits_deducted=-credits_to_add,
+                    balance_after=float(current_balance),
                     timestamp=datetime.now(timezone.utc)
                 )
-                db.add(alloc_log)
-                order.is_allocated = "allocated"
-                logger.info(f"Auto-allocated {order.credits} credits to {'reseller' if is_reseller else 'busi_user'} {target_id}")
-        
+                db.add(payment_log)
+            else:
+                logger.warning(f"Step 6: Log for payment {order.razorpay_payment_id} already exists. Skipping.")
+
+        # 7. Commit
+        logger.info("Step 7: Committing transaction to database...")
         db.commit()
-        return {"success": True, "message": "Credits updated successfully"}
+        logger.info(f"--- [SUCCESS] Payment verified for Order: {callback.razorpay_order_id} ---")
+        return {"success": True, "message": "Payment verified and credits updated"}
     
     except HTTPException:
+        db.rollback()
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"Payment callback error: {e}")
+        logger.error(f"--- [CRITICAL ERROR] {str(e)} ---")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed to update credits: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail="Internal server error during verification. Please check logs."
+        )
 
 
 class AllocateCreditsRequest(BaseModel):

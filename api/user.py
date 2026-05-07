@@ -223,13 +223,16 @@ async def get_delivery_reports(
 
         messages = query.order_by(Message.sent_at.desc()).all()
 
+        # Role-based field masking (NEW)
+        role = token_payload.get("role", "user").lower()
+        
         reports = []
         for msg in messages:
             attachment = None
             if str(msg.message_type) == "MEDIA":
                 attachment = "Attachment" 
             
-            reports.append(DeliveryReportResponse(
+            report = DeliveryReportResponse(
                 sent_at=msg.sent_at.isoformat() if msg.sent_at else None,
                 message=str(msg.message_body) if msg.message_body else "",
                 sender=str(msg.sender_number) if msg.sender_number else "Unknown",
@@ -237,9 +240,15 @@ async def get_delivery_reports(
                 attachment_url=attachment,
                 status=msg.status.value if hasattr(msg.status, 'value') else str(msg.status),
                 mode=msg.mode.value if hasattr(msg.mode, 'value') else str(msg.mode)
-            ))
+            )
             
-        return [report.model_dump(by_alias=True) for report in reports]
+            # Hide mode for user role
+            if role == "user":
+                report.mode = None
+                
+            reports.append(report)
+            
+        return [report.model_dump(by_alias=True, exclude_none=(role == "user")) for report in reports]
     except Exception as e:
         import traceback
         traceback.print_exc()

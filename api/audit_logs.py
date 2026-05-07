@@ -67,8 +67,10 @@ async def get_my_audit_logs(
     except ValueError as e:
         import logging
         logger = logging.getLogger("api.audit_logs")
-        logger.error(f"Invalid UUID format in token: '{reseller_id}'")
-        raise HTTPException(status_code=400, detail=f"Invalid reseller_id format in token: {reseller_id}")
+        # Ensure we have a sub to log even if it's missing from payload
+        token_sub = payload.get("sub") if 'payload' in locals() else "unknown"
+        logger.error(f"Invalid UUID format in token: '{token_sub}'")
+        raise HTTPException(status_code=400, detail=f"Invalid reseller_id format in token: {token_sub}")
     except Exception as e:
         import traceback
         traceback.print_exc()

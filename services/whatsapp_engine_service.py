@@ -390,7 +390,7 @@ class WhatsAppEngineService:
         
         # ✅ Convert string UUID to UUID object before query
         device_uuid = UUIDService.safe_convert(device_id)
-        device = self.db.query(Device).filter(Device.device_id == device_uuid).first()
+        device = self.db.query(Device).filter(Device.device_id == str(device_uuid)).first()
         if not device:
             logger.error(f"Device {device_id} not found in database")
             return False
@@ -607,7 +607,7 @@ class WhatsAppEngineService:
         try:
             # Convert string UUID to UUID object before query
             device_uuid = UUIDService.safe_convert(device_id)
-            device = self.db.query(Device).filter(Device.device_id == device_uuid).first()
+            device = self.db.query(Device).filter(Device.device_id == str(device_uuid)).first()
             if device:
                 old_status = device.session_status
                 device.session_status = SessionStatus.disconnected
@@ -663,7 +663,7 @@ class WhatsAppEngineService:
         device = None
         if self.db is not None:
             device_uuid = UUIDService.safe_convert(device_id)
-            device = self.db.query(Device).filter(Device.device_id == device_uuid).first()
+            device = self.db.query(Device).filter(Device.device_id == str(device_uuid)).first()
             if not device:
                 raise HTTPException(status_code=404, detail="Device not found")
         
@@ -747,7 +747,7 @@ class WhatsAppEngineService:
 
             # Create persistent log record
             db_message = Message(
-                message_id=uuid.uuid4(),
+                message_id=str(uuid.uuid4()),
                 busi_user_id=user_id,
                 channel=ChannelType.WHATSAPP,
                 mode=MessageMode.UNOFFICIAL,
@@ -772,78 +772,29 @@ class WhatsAppEngineService:
             if not normalized_to:
                 return {"success": False, "error": f"Invalid recipient number: {to}"}
             
-            # Detect if file is local (starts with / or is a relative path that exist)
-            is_local = not file_path.startswith('http') and (file_path.startswith('/') or os.path.exists(file_path))
+            # Prepare payload
+            payload = {
+                "to": normalized_to,
+                "file_path": file_path,
+                "wait": kwargs.get('wait_for_delivery', False)
+            }
             
-            if is_local and os.path.exists(file_path):
-                # 🔥 ROBUST FIX: Use multipart/form-data for local files instead of large Base64 strings
-                # This prevents 'Response ended prematurely' errors for large videos
-                try:
-                    # 🔥 UUID STRIP FIX: Remove storage UUID prefix for clean recipient view
-                    import re
-                    import mimetypes
-                    raw_filename = os.path.basename(file_path)
-                    # Handle both formats: trigger_UUID.ext and trigger_UUID_name.ext
-                    if re.match(r'^trigger_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_', raw_filename):
-                        # Format: trigger_UUID_name.ext -> name.ext (remove only UUID)
-                        filename = re.sub(r'^trigger_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_', '', raw_filename)
-                    else:
-                        # No trigger UUID prefix, use as-is
-                        filename = raw_filename
-                    
-                    mime_type, _ = mimetypes.guess_type(file_path)
-                    mime_type = mime_type or 'application/octet-stream'
-                    
-                    # Clean caption
-                    user_caption = kwargs.get('caption')
-                    if user_caption:
-                        # Also clean the user caption if it contains the filename
-                        user_caption = user_caption.replace(raw_filename, filename)
-                    
-                    final_caption = user_caption if user_caption is not None else ""
-                    
-                    payload = {
-                        "to": normalized_to, 
-                        "caption": final_caption
-                    }
-                    
-                    # 🔥 ZERO-DEPENDENCY FIX: Send as raw binary body with metadata in headers
-                    # This avoids needing 'multer' on the engine side
-                    # Headers must be Latin-1/ASCII safe, so we sanitize them
-                    import urllib.parse
-                    def sanitize_header(val):
-                        if not val: return ""
-                        # 🔥 CRITICAL: Use URL encoding to support Marathi/Unicode in headers
-                        # This avoids the 'Invalid header value' error while preserving characters
-                        stripped = str(val).replace("\r", " ").replace("\n", " ").strip()
-                        return urllib.parse.quote(stripped)
+            # Use /file-caption if caption is provided
+            caption = kwargs.get('caption')
+            endpoint = f"/session/{device_id}/file"
+            
+            if caption:
+                endpoint = f"/session/{device_id}/file-caption"
+                payload["caption"] = caption
+                logger.info(f"📝 [SEND_FILE] Including caption: {caption[:30]}...")
 
-                    headers = {
-                        "X-WA-To": sanitize_header(normalized_to),
-                        "X-WA-Filename": sanitize_header(filename),
-                        "X-WA-Caption": sanitize_header(final_caption),
-                        "X-WA-MimeType": sanitize_header(mime_type),
-                        "X-WA-Wait": "true" if kwargs.get('wait_for_delivery', False) else "false",
-                        "Content-Type": "application/octet-stream"
-                    }
-                    
-                    logger.info(f"📤 [SEND_FILE] Streaming raw binary: {filename} ({mime_type})")
-                    
-                    with open(file_path, "rb") as f:
-                        response = self._make_request_with_retry(
-                            "POST", 
-                            f"/session/{device_id}/file", 
-                            data=f, # Stream directly from disk
-                            headers=headers,
-                            timeout=kwargs.get('max_wait_time', 60) + 10
-                        )
-                except Exception as file_err:
-                    logger.error(f"❌ [SEND_FILE_MULTIPART_ERROR] {str(file_err)}")
-                    return {"success": False, "message": f"Failed to process local file: {str(file_err)}", "data": None}
-            else:
-                # Use URL endpoint
-                payload = {"to": normalized_to, "file_path": file_path, "wait": kwargs.get('wait_for_delivery', False)}
-                response = self._make_request_with_retry("POST", f"/session/{device_id}/file", json=payload, timeout=kwargs.get('max_wait_time', 60) + 5)
+            # Make request to engine
+            response = self._make_request_with_retry(
+                "POST", 
+                endpoint, 
+                json=payload, 
+                timeout=kwargs.get('max_wait_time', 60) + 10
+            )
             
             if response is None:
                 return {"success": False, "message": "Engine no response after multiple retries (timeout/connection error)", "data": None}

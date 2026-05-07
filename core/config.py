@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # Database
-    DATABASE_URL: str = "postgresql://meassage_api_6631_user:VXmYtwhnsZsaXRc49xWHJN9g0MxD7ndW@dpg-d7ea64hf9bms738jajqg-a.oregon-postgres.render.com/meassage_api_6631"
+    DATABASE_URL: str = "postgresql://whatsapp_api_2026_user:6KR7tFiUWaTx6fBIwQuC1qrMJKjpQZoY@dpg-d7st2s77f7vs739huv2g-a.oregon-postgres.render.com/whatsapp_api_2026"
 
     # Security
     SECRET_KEY: str = "your-super-secret-key-here-change-in-production"
@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     # Razorpay Payment Gateway
     RAZORPAY_KEY_ID: str = ""
     RAZORPAY_KEY_SECRET: str = ""
+    RAZORPAY_TEST_MODE: bool = True
 
     # Engine
 
@@ -80,13 +81,13 @@ class Settings(BaseSettings):
             
         self._engine = create_engine(
             db_url,
-            pool_size=25,  # Production-optimized: not configurable via env
-            max_overflow=25,  # Production-optimized: not configurable via env
-            pool_timeout=60,  # Increased from 30 to 60 seconds for high load scenarios
-            pool_recycle=300,  # Reduced from 3600 to 300 (5 minutes) to prevent stale connections
+            pool_size=25,
+            max_overflow=25,
+            pool_timeout=10,  # Fail fast if pool is exhausted
+            pool_recycle=300,
             pool_pre_ping=True,
             connect_args={
-                "connect_timeout": 10,  # Reduced from 30 to 10 seconds
+                "connect_timeout": 5,  # Fail fast if server is unreachable
                 "sslmode": "require",
                 "application_name": "whatsapp_platform"
             }

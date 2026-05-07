@@ -201,7 +201,7 @@ async def receive_whatsapp_status(payload: Dict[str, Any], db: Session = Depends
         final_status = status_map.get(str(status), status)
         
         # Update the Message table (Delivery Reports)
-        message = db.query(Message).filter(Message.message_id == msg_id).first()
+        message = db.query(Message).filter(Message.message_id == str(msg_id)).first()
         if message:
             # Normalize to uppercase for Enum matching
             message.status = final_status.upper()

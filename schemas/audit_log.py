@@ -29,11 +29,11 @@ class AuditLogSchema(BaseModel):
         from_attributes = True
 
 class AuditLogCreate(BaseModel):
-    reseller_id: Optional[UUID] = None
-    performed_by_id: UUID
+    reseller_id: Optional[str] = None
+    performed_by_id: str
     performed_by_name: str
     performed_by_role: str
-    affected_user_id: Optional[UUID] = None
+    affected_user_id: Optional[str] = None
     affected_user_name: Optional[str] = None
     affected_user_email: Optional[str] = None
     action_type: str

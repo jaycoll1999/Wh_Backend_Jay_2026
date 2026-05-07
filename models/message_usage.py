@@ -9,7 +9,7 @@ class MessageUsageCreditLog(Base):
     __tablename__ = "message_usage_credit_logs"
 
     usage_id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    busi_user_id = Column(String(36), ForeignKey("businesses.busi_user_id"), nullable=False, index=True)
+    busi_user_id = Column(String(36), nullable=False, index=True)
     message_id = Column(String(255), nullable=True, index=True) # Changed from UUID/FK to String to support Payments/Plans
     credits_deducted = Column(Float, nullable=False)
     balance_after = Column(Float, nullable=False)

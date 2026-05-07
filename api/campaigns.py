@@ -215,9 +215,38 @@ async def start_campaign(
                     if found_col:
                         phone_col = found_col
                     elif headers:
-                        # Fallback to FIRST column if no phone column found (likely what the user intended)
-                        phone_col = headers[0]
-                        logger.warning(f"⚠️ Could not identify phone column. Defaulting to first column: {phone_col}")
+                        # Improved detection: scan data rows for phone-like numeric patterns
+                        best_candidate = None
+                        max_score = -999
+                        
+                        for col in headers:
+                            score = 0
+                            # Scan first 10 rows for phone-like data
+                            for row in rows_data[:10]:
+                                val = str(row.get("data", {}).get(col, "")).strip()
+                                # Clean numeric string
+                                clean = "".join(c for c in val if c.isdigit())
+                                
+                                # Match phone patterns (digits only, starts with 91, or 10+ digits)
+                                if len(clean) >= 10 or val.startswith('+91') or val.startswith('91'):
+                                    score += 2
+                                # Penalize columns containing alphabets (likely names)
+                                if any(c.isalpha() for c in val):
+                                    score -= 5
+                            
+                            if score > max_score:
+                                max_score = score
+                                best_candidate = col
+                            elif score == max_score:
+                                # Tie-breaker: prefer later columns (per requirement 4d)
+                                best_candidate = col
+                        
+                        if max_score > 0:
+                            phone_col = best_candidate
+                        else:
+                            # Final fallback to LAST column instead of FIRST
+                            phone_col = headers[-1]
+                            logger.warning(f"⚠️ Could not identify phone column. Defaulting to last column: {phone_col}")
 
                 for row in rows_data:
                     data = row.get("data", {})

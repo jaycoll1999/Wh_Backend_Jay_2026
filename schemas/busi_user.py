@@ -8,7 +8,7 @@ class BusiUserProfileSchema(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     username: str = Field(..., min_length=3, max_length=100)
     email: EmailStr
-    phone: str = Field(..., min_length=10, max_length=20)
+    phone: str = Field(..., min_length=1, max_length=20)
     password: str = Field(..., min_length=8, max_length=255)
     image_url: Optional[str] = None
 
@@ -26,7 +26,7 @@ class BusiUserInfoSchema(BaseModel):
     organization_type: Optional[str] = Field(None, max_length=100)
     business_description: Optional[str] = None
     erp_system: Optional[str] = Field(None, max_length=100)
-    gstin: Optional[str] = Field(None, min_length=15, max_length=20)
+    gstin: Optional[str] = Field(None, max_length=20)
     bank_name: Optional[str] = Field(None, max_length=255)
 
 
@@ -45,7 +45,7 @@ class BusiUserWalletSchema(BaseModel):
 class BusiUserCreateSchema(BaseModel):
     role: str = Field(default="business_owner", max_length=50)
     status: str = Field(default="active", max_length=20)
-    parent_reseller_id: Optional[uuid.UUID] = None
+    parent_reseller_id: Optional[str] = None
     parent_role: Optional[str] = Field(default="reseller", max_length=20)
     profile: BusiUserProfileSchema
     business: BusiUserInfoSchema
@@ -77,7 +77,7 @@ class BusiUserResponseSchema(BaseModel):
     busi_user_id: uuid.UUID
     role: str
     status: str
-    parent_reseller_id: Optional[uuid.UUID] = None
+    parent_reseller_id: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     

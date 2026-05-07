@@ -83,9 +83,17 @@ class BusiUserService:
         
         # Log to AuditLog
         audit_service = AuditLogService(self.db)
+        
+        # Sanitize IDs to ensure they are None if empty string
+        reseller_id_val = db_business.parent_reseller_id if db_business.parent_role == "reseller" else None
+        if not reseller_id_val: reseller_id_val = None
+        
+        performed_id_val = db_business.parent_reseller_id or db_business.busi_user_id
+        if not performed_id_val: performed_id_val = db_business.busi_user_id # fallback
+        
         audit_log = AuditLogCreate(
-            reseller_id=db_business.parent_reseller_id if db_business.parent_role == "reseller" else None,
-            performed_by_id=db_business.parent_reseller_id or db_business.busi_user_id,
+            reseller_id=reseller_id_val,
+            performed_by_id=performed_id_val,
             performed_by_name=parent_reseller.name if parent_reseller else "System/Admin",
             performed_by_role=db_business.parent_role,
             affected_user_id=db_business.busi_user_id,

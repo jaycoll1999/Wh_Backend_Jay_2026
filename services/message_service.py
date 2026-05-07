@@ -129,7 +129,7 @@ class MessageService:
 
     def get_message_by_id(self, message_id: str) -> Optional[Message]:
         """Get message by ID"""
-        return self.db.query(Message).filter(Message.message_id == message_id).first()
+        return self.db.query(Message).filter(Message.message_id == str(message_id)).first()
 
     def get_messages_by_user(
         self, 

@@ -73,7 +73,7 @@ class WebSocketManager:
         from models.device import Device
         
         # Get all users who have access to this device
-        device = db.query(Device).filter(Device.device_id == device_id).first()
+        device = db.query(Device).filter(Device.device_id == str(device_id)).first()
         if not device:
             logger.warning(f"Device {device_id} not found for WebSocket broadcast")
             return
@@ -110,7 +110,7 @@ class WebSocketManager:
         """Broadcast device connection status change"""
         from models.device import Device
         
-        device = db.query(Device).filter(Device.device_id == device_id).first()
+        device = db.query(Device).filter(Device.device_id == str(device_id)).first()
         if not device:
             return
         

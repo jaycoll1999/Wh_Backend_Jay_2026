@@ -955,7 +955,7 @@ Errors:        {error_count}
                         # 3. Path Accessibility Validation
                         if os.path.exists(media_path):
                             logger.info(f"   ✅ Media file validated and accessible: {media_path}")
-                            media_url = media_path
+                            media_url = os.path.abspath(media_path)
                         else:
                             # If it's a real HTTP URL (remote), we keep it as is, otherwise log warning
                             if not media_url.startswith('http'):

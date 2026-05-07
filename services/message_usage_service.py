@@ -21,7 +21,7 @@ class MessageUsageService:
     def create_usage_log(self, usage_data: MessageUsageCreditLogCreate) -> MessageUsageCreditLog:
         """Create a new message usage credit log entry."""
         # Auto-generate usage_id
-        generated_usage_id = uuid.uuid4()
+        generated_usage_id = str(uuid.uuid4())
         
         # Detect user type (reseller or business)
         user_type = self.get_user_type(usage_data.busi_user_id)
@@ -266,7 +266,7 @@ class MessageUsageService:
             # 4. Create Log
             log_time = timestamp or datetime.now(timezone.utc)
             usage_log = MessageUsageCreditLog(
-                usage_id=uuid.uuid4(),
+                usage_id=str(uuid.uuid4()),
                 busi_user_id=str(busi_user_id),
                 message_id=message_id,
                 credits_deducted=amount,
